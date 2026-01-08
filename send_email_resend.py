@@ -22,6 +22,7 @@ LOAD_THRESHOLD_WATTS = int(os.getenv("LOAD_THRESHOLD_WATTS", 1000))
 LOAD_DURATION_HOURS = int(os.getenv("LOAD_DURATION_HOURS", 2))
 BATTERY_THRESHOLD_PERCENT = int(os.getenv("BATTERY_THRESHOLD_PERCENT", 40))
 ALERT_COOLDOWN_MINUTES = int(os.getenv("ALERT_COOLDOWN_MINUTES", 60))
+HISTORY_HOURS = 12  # 12-hour load history
 
 # ----------------------------
 # Email (Resend) Config
@@ -36,7 +37,11 @@ RECIPIENT_EMAIL = os.getenv('RECIPIENT_EMAIL')
 headers = {"token": TOKEN, "Content-Type": "application/x-www-form-urlencoded"}
 high_load_start = None
 last_alert_time = None
-latest_data = {}  # Store latest readings for web display
+latest_data = {}
+load_history = []  # store tuples: (timestamp, total_load)
+
+# East African Timezone
+EAT = timezone(timedelta(hours=3))
 
 # ----------------------------
 # Email function
@@ -48,7 +53,7 @@ def send_email(subject, html_content):
         return False
     
     # Rate limit
-    if last_alert_time and datetime.now(timezone.utc) - last_alert_time < timedelta(minutes=ALERT_COOLDOWN_MINUTES):
+    if last_alert_time and datetime.now(EAT) - last_alert_time < timedelta(minutes=ALERT_COOLDOWN_MINUTES):
         print("⚠️ Alert cooldown active, skipping email")
         return False
     
@@ -70,7 +75,7 @@ def send_email(subject, html_content):
         )
         if response.status_code == 200:
             print(f"✓ Email sent: {subject}")
-            last_alert_time = datetime.now(timezone.utc)
+            last_alert_time = datetime.now(EAT)
             return True
         else:
             print(f"✗ Email failed {response.status_code}: {response.text}")
@@ -86,18 +91,20 @@ def can_send_alert():
     global last_alert_time
     if last_alert_time is None:
         return True
-    return datetime.now(timezone.utc) - last_alert_time > timedelta(minutes=ALERT_COOLDOWN_MINUTES)
+    return datetime.now(EAT) - last_alert_time > timedelta(minutes=ALERT_COOLDOWN_MINUTES)
 
 # ----------------------------
 # Growatt Polling Loop
 # ----------------------------
 def poll_growatt():
-    global high_load_start, latest_data
+    global high_load_start, latest_data, load_history
     while True:
         try:
             total_output_power = 0
             battery_percent = None
             inverter_data = []
+
+            now = datetime.now(EAT)
 
             for sn in SERIAL_NUMBERS:
                 response = requests.post(
@@ -118,21 +125,25 @@ def poll_growatt():
                     "BatterySOC": soc
                 })
 
-            # Save latest readings for web display
+            # Save latest readings
             latest_data = {
-                "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+                "timestamp": now.strftime("%Y-%m-%d %H:%M:%S EAT"),
                 "total_output_power": total_output_power,
                 "battery_percent": battery_percent,
                 "inverters": inverter_data
             }
+
+            # Save to 12-hour history
+            load_history.append((now, total_output_power))
+            load_history = [(t, p) for t, p in load_history if t >= now - timedelta(hours=HISTORY_HOURS)]
 
             print(f"{latest_data['timestamp']} | Load={total_output_power}W | Battery={battery_percent}%")
 
             # --- Load Alert ---
             if total_output_power >= LOAD_THRESHOLD_WATTS:
                 if high_load_start is None:
-                    high_load_start = datetime.now(timezone.utc)
-                elif datetime.now(timezone.utc) - high_load_start >= timedelta(hours=LOAD_DURATION_HOURS):
+                    high_load_start = now
+                elif now - high_load_start >= timedelta(hours=LOAD_DURATION_HOURS):
                     if can_send_alert():
                         send_email(
                             subject="⚠️ Growatt Alert: High Load",
@@ -159,7 +170,7 @@ def poll_growatt():
 # ----------------------------
 @app.route("/")
 def home():
-    # Determine color for total load and battery
+    # Colors for indicators
     load_color = "red" if latest_data.get("total_output_power", 0) >= LOAD_THRESHOLD_WATTS else "green"
     battery_color = "red" if latest_data.get("battery_percent", 100) <= BATTERY_THRESHOLD_PERCENT else "green"
 
@@ -188,9 +199,28 @@ def home():
         </tr>
         """
 
+    html += "</table><br>"
+
+    # Load History Table
     html += """
-    </table>
-    <br>
+    <h3>Load History (Last 12 hours)</h3>
+    <table border="1" cellpadding="5" cellspacing="0">
+        <tr>
+            <th>Time (EAT)</th>
+            <th>Total Load (W)</th>
+        </tr>
+    """
+    for t, p in reversed(load_history):  # latest first
+        html += f"""
+        <tr>
+            <td>{t.strftime('%Y-%m-%d %H:%M:%S')}</td>
+            <td>{p}</td>
+        </tr>
+        """
+    html += "</table><br>"
+
+    # Manual test alert button
+    html += """
     <form action="/test_alert" method="post">
         <button type="submit">Send Test Alert Email</button>
     </form>
