@@ -83,14 +83,32 @@ def get_weather_forecast():
         print(f"✗ Error fetching weather forecast: {e}")
         return None
 
-def analyze_solar_conditions(forecast, hours_ahead=10):
-    """Analyze upcoming solar conditions for the next N hours"""
+def analyze_solar_conditions(forecast):
+    """Analyze upcoming solar conditions - smart daytime-only analysis
+    - During night (6 PM - 6 AM): Look at tomorrow's daytime (6 AM - 6 PM)
+    - During day (6 AM - 6 PM): Look at remaining daylight hours today
+    """
     if not forecast:
         return None
     
     try:
         now = datetime.now(EAT)
-        future_time = now + timedelta(hours=hours_ahead)
+        current_hour = now.hour
+        
+        # Determine if it's currently nighttime (6 PM to 6 AM)
+        is_nighttime = current_hour < 6 or current_hour >= 18
+        
+        if is_nighttime:
+            # During night: analyze tomorrow's full daytime (6 AM to 6 PM)
+            tomorrow = now + timedelta(days=1)
+            start_time = tomorrow.replace(hour=6, minute=0, second=0, microsecond=0)
+            end_time = tomorrow.replace(hour=18, minute=0, second=0, microsecond=0)
+            analysis_label = "Tomorrow's Daylight"
+        else:
+            # During day: analyze remaining daylight today (now until 6 PM)
+            start_time = now
+            end_time = now.replace(hour=18, minute=0, second=0, microsecond=0)
+            analysis_label = "Today's Remaining Daylight"
         
         avg_cloud_cover = 0
         avg_solar_radiation = 0
@@ -98,10 +116,15 @@ def analyze_solar_conditions(forecast, hours_ahead=10):
         
         for i, time_str in enumerate(forecast['times']):
             forecast_time = datetime.fromisoformat(time_str.replace('Z', '+00:00')).astimezone(EAT)
-            if now <= forecast_time <= future_time:
-                avg_cloud_cover += forecast['cloud_cover'][i]
-                avg_solar_radiation += forecast['solar_radiation'][i]
-                count += 1
+            
+            # Only include times within our analysis window
+            if start_time <= forecast_time <= end_time:
+                # During daytime hours only (6 AM to 6 PM)
+                hour = forecast_time.hour
+                if 6 <= hour <= 18:
+                    avg_cloud_cover += forecast['cloud_cover'][i]
+                    avg_solar_radiation += forecast['solar_radiation'][i]
+                    count += 1
         
         if count > 0:
             avg_cloud_cover /= count
@@ -114,7 +137,9 @@ def analyze_solar_conditions(forecast, hours_ahead=10):
                 'avg_cloud_cover': avg_cloud_cover,
                 'avg_solar_radiation': avg_solar_radiation,
                 'poor_conditions': poor_conditions,
-                'hours_analyzed': count
+                'hours_analyzed': count,
+                'analysis_period': analysis_label,
+                'is_nighttime': is_nighttime
             }
     except Exception as e:
         print(f"✗ Error analyzing solar conditions: {e}")
@@ -415,7 +440,7 @@ def poll_growatt():
             print(f"{latest_data['timestamp']} | Load={total_output_power:.0f}W | Primary={primary_battery_min:.0f}% | Backup={backup_battery:.0f}% ({backup_voltage:.1f}V) | Backup Active={backup_active}")
             
             # Check alerts with solar conditions
-            solar_conditions = analyze_solar_conditions(weather_forecast, hours_ahead=10)
+            solar_conditions = analyze_solar_conditions(weather_forecast)
             check_and_send_alerts(inverter_data, solar_conditions)
         
         except Exception as e:
@@ -446,7 +471,7 @@ def home():
     battery_values = [p for t, p in battery_history]
     
     # Solar conditions
-    solar_conditions = analyze_solar_conditions(weather_forecast, hours_ahead=10)
+    solar_conditions = analyze_solar_conditions(weather_forecast)
     
     html = f"""
 <!DOCTYPE html>
@@ -730,11 +755,15 @@ def home():
     # Weather alert
     if solar_conditions:
         alert_class = "poor" if solar_conditions['poor_conditions'] else "good"
+        period = solar_conditions.get('analysis_period', 'Next 10 Hours')
+        is_night = solar_conditions.get('is_nighttime', False)
+        
         html += f"""
             <div class="weather-alert {alert_class}">
                 <h3>{'☁️ Poor Solar Conditions Ahead' if solar_conditions['poor_conditions'] else '☀️ Good Solar Conditions Expected'}</h3>
-                <p><strong>Next 10 Hours:</strong> Cloud Cover: {solar_conditions['avg_cloud_cover']:.0f}% | Solar Radiation: {solar_conditions['avg_solar_radiation']:.0f} W/m²</p>
+                <p><strong>{period}:</strong> Cloud Cover: {solar_conditions['avg_cloud_cover']:.0f}% | Solar Radiation: {solar_conditions['avg_solar_radiation']:.0f} W/m²</p>
                 {'<p>⚠️ Limited recharge expected. Monitor battery levels closely.</p>' if solar_conditions['poor_conditions'] else '<p>✓ Batteries should recharge well during daylight hours.</p>'}
+                {f'<p style="font-size: 0.9em; opacity: 0.8;">🌙 Currently nighttime - analyzing tomorrow\'s solar potential</p>' if is_night else ''}
             </div>
 """
     
