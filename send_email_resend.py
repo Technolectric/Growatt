@@ -3,7 +3,12 @@ import time
 import requests
 from datetime import datetime, timedelta
 from threading import Thread
-from flask import Flask
+from flask import Flask, render_template_string, request
+
+# ----------------------------
+# Flask app
+# ----------------------------
+app = Flask(__name__)
 
 # ----------------------------
 # Growatt Config (from env)
@@ -31,11 +36,10 @@ RECIPIENT_EMAIL = os.getenv('RECIPIENT_EMAIL')
 headers = {"token": TOKEN, "Content-Type": "application/x-www-form-urlencoded"}
 high_load_start = None
 last_alert_time = None
-
-app = Flask(__name__)
+latest_data = {}  # Store latest readings for web display
 
 # ----------------------------
-# Email Function
+# Email function
 # ----------------------------
 def send_email(subject, html_content):
     global last_alert_time
@@ -85,14 +89,15 @@ def can_send_alert():
     return datetime.utcnow() - last_alert_time > timedelta(minutes=ALERT_COOLDOWN_MINUTES)
 
 # ----------------------------
-# Growatt Polling
+# Growatt Polling Loop
 # ----------------------------
 def poll_growatt():
-    global high_load_start
+    global high_load_start, latest_data
     while True:
         try:
             total_output_power = 0
             battery_percent = None
+            inverter_data = []
 
             for sn in SERIAL_NUMBERS:
                 response = requests.post(
@@ -100,12 +105,28 @@ def poll_growatt():
                 )
                 response.raise_for_status()
                 data = response.json().get("data", {})
-                total_output_power += data.get("outPutPower", 0)
+                out_power = data.get("outPutPower", 0)
+                soc = data.get("soc") or data.get("capacity")
+                total_output_power += out_power
 
                 if sn.startswith("KAM"):
-                    battery_percent = data.get("soc") or data.get("capacity")
+                    battery_percent = soc
 
-            print(f"{datetime.utcnow()} | Load={total_output_power}W | Battery={battery_percent}%")
+                inverter_data.append({
+                    "SN": sn,
+                    "OutputPower": out_power,
+                    "BatterySOC": soc
+                })
+
+            # Save latest readings for web display
+            latest_data = {
+                "timestamp": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
+                "total_output_power": total_output_power,
+                "battery_percent": battery_percent,
+                "inverters": inverter_data
+            }
+
+            print(f"{latest_data['timestamp']} | Load={total_output_power}W | Battery={battery_percent}%")
 
             # --- Load Alert ---
             if total_output_power >= LOAD_THRESHOLD_WATTS:
@@ -134,16 +155,65 @@ def poll_growatt():
         time.sleep(POLL_INTERVAL_MINUTES * 60)
 
 # ----------------------------
-# Start Polling Thread
+# Flask Web Routes
+# ----------------------------
+
+@app.route("/")
+def home():
+    # Determine color for total load
+    load_color = "red" if latest_data.get("total_output_power", 0) >= LOAD_THRESHOLD_WATTS else "green"
+    battery_color = "red" if latest_data.get("battery_percent", 100) <= BATTERY_THRESHOLD_PERCENT else "green"
+
+    html = f"""
+    <h2>Growatt Monitor</h2>
+    <p>Last updated: {latest_data.get('timestamp', 'N/A')}</p>
+    <p>Total Output Power: <span style="color:{load_color}">{latest_data.get('total_output_power', 'N/A')} W</span></p>
+    <p>KAM Battery: <span style="color:{battery_color}">{latest_data.get('battery_percent', 'N/A')}%</span></p>
+
+    <h3>Per Inverter Data</h3>
+    <table border="1" cellpadding="5" cellspacing="0">
+        <tr>
+            <th>SN</th>
+            <th>Output Power (W)</th>
+            <th>Battery SOC (%)</th>
+        </tr>
+    """
+
+    for inv in latest_data.get("inverters", []):
+        inv_color = "red" if (inv['BatterySOC'] is not None and inv['BatterySOC'] <= BATTERY_THRESHOLD_PERCENT) else "green"
+        html += f"""
+        <tr>
+            <td>{inv['SN']}</td>
+            <td>{inv['OutputPower']}</td>
+            <td style="color:{inv_color}">{inv['BatterySOC']}</td>
+        </tr>
+        """
+
+    html += """
+    </table>
+    <br>
+    <form action="/test_alert" method="post">
+        <button type="submit">Send Test Alert Email</button>
+    </form>
+    """
+
+    return render_template_string(html)
+
+@app.route("/test_alert", methods=["POST"])
+def test_alert():
+    send_email(
+        subject="🔔 Growatt Test Alert",
+        html_content="<p>This is a test alert from your Growatt monitor.</p>"
+    )
+    return "<p>Test alert sent! ✅ <a href='/'>Back</a></p>"
+
+# ----------------------------
+# Start background polling thread
 # ----------------------------
 Thread(target=poll_growatt, daemon=True).start()
 
 # ----------------------------
-# Minimal Web Route (Required for Render Free)
+# Run Flask
 # ----------------------------
-@app.route("/")
-def home():
-    return "Growatt monitor running ✅"
-
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
