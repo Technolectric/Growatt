@@ -185,57 +185,225 @@ def home():
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Growatt Monitor</title>
+    <title>Tulia House - Solar Monitor</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
-        body {{ font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }}
-        .container {{ max-width: 1200px; margin: 0 auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
-        h1 {{ color: #333; }}
-        .metric {{ display: inline-block; margin: 15px 20px; padding: 15px; border-radius: 5px; background: #f9f9f9; }}
-        .metric.red {{ border-left: 4px solid red; }}
-        .metric.green {{ border-left: 4px solid green; }}
-        table {{ width: 100%; border-collapse: collapse; margin: 20px 0; }}
-        th, td {{ padding: 10px; text-align: left; border-bottom: 1px solid #ddd; }}
-        th {{ background: #333; color: white; }}
-        .chart-container {{ margin: 30px 0; }}
-        canvas {{ max-height: 400px; }}
-        button {{ background: #007bff; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; margin: 10px 0; }}
-        button:hover {{ background: #0056b3; }}
+        * {{
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }}
+        
+        body {{ 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(rgba(0, 0, 0, 0.4), rgba(0, 0, 0, 0.6)), 
+                        url('https://images.unsplash.com/photo-1582268611958-ebfd161ef9cf?w=1600&q=80') center/cover fixed;
+            min-height: 100vh;
+            padding: 20px;
+        }}
+        
+        .header {{
+            text-align: center;
+            color: white;
+            margin-bottom: 30px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.7);
+        }}
+        
+        .header h1 {{
+            font-size: 2.5em;
+            margin-bottom: 5px;
+            font-weight: 300;
+            letter-spacing: 2px;
+        }}
+        
+        .header .subtitle {{
+            font-size: 1.1em;
+            opacity: 0.9;
+            font-weight: 300;
+        }}
+        
+        .header .location {{
+            font-size: 0.9em;
+            opacity: 0.8;
+            margin-top: 5px;
+        }}
+        
+        .container {{ 
+            max-width: 1200px; 
+            margin: 0 auto;
+        }}
+        
+        .card {{
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+            padding: 25px;
+            border-radius: 15px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+            margin-bottom: 20px;
+        }}
+        
+        .timestamp {{
+            text-align: center;
+            color: #666;
+            font-size: 0.95em;
+            margin-bottom: 20px;
+        }}
+        
+        .metrics {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }}
+        
+        .metric {{ 
+            padding: 20px;
+            border-radius: 10px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
+            transition: transform 0.2s;
+        }}
+        
+        .metric:hover {{
+            transform: translateY(-5px);
+        }}
+        
+        .metric.green {{ 
+            background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
+        }}
+        
+        .metric.red {{ 
+            background: linear-gradient(135deg, #eb3349 0%, #f45c43 100%);
+        }}
+        
+        .metric-label {{
+            font-size: 0.9em;
+            opacity: 0.9;
+            margin-bottom: 8px;
+        }}
+        
+        .metric-value {{
+            font-size: 2em;
+            font-weight: bold;
+        }}
+        
+        h2 {{ 
+            color: #333;
+            margin-bottom: 20px;
+            font-size: 1.5em;
+            font-weight: 500;
+        }}
+        
+        table {{ 
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+            background: white;
+            border-radius: 8px;
+            overflow: hidden;
+        }}
+        
+        th, td {{ 
+            padding: 15px;
+            text-align: left;
+            border-bottom: 1px solid #eee;
+        }}
+        
+        th {{ 
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            font-weight: 500;
+        }}
+        
+        tr:hover {{
+            background: #f8f9fa;
+        }}
+        
+        .chart-container {{ 
+            margin: 30px 0;
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+        }}
+        
+        canvas {{ 
+            max-height: 400px;
+        }}
+        
+        button {{ 
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 12px 30px;
+            border-radius: 25px;
+            cursor: pointer;
+            font-size: 1em;
+            font-weight: 500;
+            box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
+            transition: all 0.3s;
+        }}
+        
+        button:hover {{ 
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(102, 126, 234, 0.6);
+        }}
+        
+        .footer {{
+            text-align: center;
+            color: white;
+            margin-top: 30px;
+            font-size: 0.9em;
+            text-shadow: 1px 1px 3px rgba(0,0,0,0.5);
+        }}
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>🔋 Growatt Monitor</h1>
-        <p><strong>Last updated:</strong> {latest_data.get('timestamp', 'N/A')}</p>
-        
-        <div class="metric {load_color}">
-            <strong>Total Output Power:</strong> {latest_data.get('total_output_power', 'N/A')} W
+        <div class="header">
+            <h1>TULIA HOUSE</h1>
+            <div class="subtitle">Solar Energy Monitoring System</div>
+            <div class="location">📍 Champagne Ridge, Kajiado • Rift Valley Views</div>
         </div>
         
-        <div class="metric {battery_color}">
-            <strong>Total Battery Discharge:</strong> {latest_data.get('total_battery_discharge_W', 'N/A')} W
-        </div>
-        
-        <h2>Per Inverter Data</h2>
-        <table>
-            <tr>
-                <th>SN</th>
-                <th>Output Power (W)</th>
-                <th>Battery Power (W)</th>
-            </tr>
+        <div class="card">
+            <div class="timestamp">
+                <strong>Last Updated:</strong> {latest_data.get('timestamp', 'N/A')}
+            </div>
+            
+            <div class="metrics">
+                <div class="metric {load_color}">
+                    <div class="metric-label">Total Output Power</div>
+                    <div class="metric-value">{latest_data.get('total_output_power', 'N/A')} W</div>
+                </div>
+                
+                <div class="metric {battery_color}">
+                    <div class="metric-label">Battery Discharge</div>
+                    <div class="metric-value">{latest_data.get('total_battery_discharge_W', 'N/A')} W</div>
+                </div>
+            </div>
+            
+            <h2>Inverter Status</h2>
+            <table>
+                <tr>
+                    <th>Serial Number</th>
+                    <th>Output Power (W)</th>
+                    <th>Battery Power (W)</th>
+                </tr>
 """
     
     for inv in latest_data.get("inverters", []):
         html += f"""
-            <tr>
-                <td>{inv['SN']}</td>
-                <td>{inv['OutputPower']}</td>
-                <td>{inv['pBat']}</td>
-            </tr>
+                <tr>
+                    <td>{inv['SN']}</td>
+                    <td>{inv['OutputPower']}</td>
+                    <td>{inv['pBat']}</td>
+                </tr>
 """
     
     html += """
-        </table>
+            </table>
+        </div>
 """
     
     # Auto-refresh every 5 minutes
@@ -245,76 +413,102 @@ def home():
     
     # Merged Chart
     html += f"""
-        <div class="chart-container">
-            <h2>Power Monitoring - Last 12 Hours</h2>
-            <canvas id="mergedChart"></canvas>
-        </div>
-        
-        <script>
-            const ctx = document.getElementById('mergedChart').getContext('2d');
-            new Chart(ctx, {{
-                type: 'line',
-                data: {{
-                    labels: {times},
-                    datasets: [
-                        {{
-                            label: 'Total Load (W)',
-                            data: {load_values},
-                            borderColor: 'rgb(75, 192, 192)',
-                            backgroundColor: 'rgba(75, 192, 192, 0.1)',
-                            borderWidth: 2,
-                            tension: 0.1,
-                            yAxisID: 'y'
-                        }},
-                        {{
-                            label: 'Battery Discharge (W)',
-                            data: {battery_values},
-                            borderColor: 'rgb(255, 99, 132)',
-                            backgroundColor: 'rgba(255, 99, 132, 0.1)',
-                            borderWidth: 2,
-                            tension: 0.1,
-                            yAxisID: 'y'
-                        }}
-                    ]
-                }},
-                options: {{
-                    responsive: true,
-                    maintainAspectRatio: true,
-                    interaction: {{
-                        mode: 'index',
-                        intersect: false
-                    }},
-                    scales: {{
-                        y: {{
-                            type: 'linear',
-                            display: true,
-                            position: 'left',
-                            title: {{
-                                display: true,
-                                text: 'Power (W)'
+        <div class="card">
+            <div class="chart-container">
+                <h2>Power Monitoring - Last 12 Hours</h2>
+                <canvas id="mergedChart"></canvas>
+            </div>
+            
+            <script>
+                const ctx = document.getElementById('mergedChart').getContext('2d');
+                new Chart(ctx, {{
+                    type: 'line',
+                    data: {{
+                        labels: {times},
+                        datasets: [
+                            {{
+                                label: 'Total Load (W)',
+                                data: {load_values},
+                                borderColor: 'rgb(17, 153, 142)',
+                                backgroundColor: 'rgba(17, 153, 142, 0.1)',
+                                borderWidth: 3,
+                                tension: 0.4,
+                                yAxisID: 'y',
+                                fill: true
+                            }},
+                            {{
+                                label: 'Battery Discharge (W)',
+                                data: {battery_values},
+                                borderColor: 'rgb(235, 51, 73)',
+                                backgroundColor: 'rgba(235, 51, 73, 0.1)',
+                                borderWidth: 3,
+                                tension: 0.4,
+                                yAxisID: 'y',
+                                fill: true
                             }}
-                        }}
+                        ]
                     }},
-                    plugins: {{
-                        legend: {{
-                            display: true,
-                            position: 'top'
+                    options: {{
+                        responsive: true,
+                        maintainAspectRatio: true,
+                        interaction: {{
+                            mode: 'index',
+                            intersect: false
                         }},
-                        tooltip: {{
-                            callbacks: {{
-                                label: function(context) {{
-                                    return context.dataset.label + ': ' + context.parsed.y.toFixed(0) + ' W';
+                        scales: {{
+                            y: {{
+                                type: 'linear',
+                                display: true,
+                                position: 'left',
+                                title: {{
+                                    display: true,
+                                    text: 'Power (W)',
+                                    font: {{
+                                        size: 14,
+                                        weight: 'bold'
+                                    }}
+                                }},
+                                grid: {{
+                                    color: 'rgba(0, 0, 0, 0.1)'
+                                }}
+                            }},
+                            x: {{
+                                grid: {{
+                                    color: 'rgba(0, 0, 0, 0.05)'
+                                }}
+                            }}
+                        }},
+                        plugins: {{
+                            legend: {{
+                                display: true,
+                                position: 'top',
+                                labels: {{
+                                    font: {{
+                                        size: 13
+                                    }},
+                                    padding: 15
+                                }}
+                            }},
+                            tooltip: {{
+                                callbacks: {{
+                                    label: function(context) {{
+                                        return context.dataset.label + ': ' + context.parsed.y.toFixed(0) + ' W';
+                                    }}
                                 }}
                             }}
                         }}
                     }}
-                }}
-            }});
-        </script>
+                }});
+            </script>
+            
+            <form method="POST" action="/test_alert" style="text-align: center; margin-top: 30px;">
+                <button type="submit">🔔 Send Test Alert</button>
+            </form>
+        </div>
         
-        <form method="POST" action="/test_alert">
-            <button type="submit">Send Test Alert Email</button>
-        </form>
+        <div class="footer">
+            Powered by Growatt Solar System • Managed by YourHost
+        </div>
     </div>
 </body>
 </html>
@@ -325,10 +519,10 @@ def home():
 @app.route("/test_alert", methods=["POST"])
 def test_alert():
     send_email(
-        subject="🔔 Growatt Test Alert",
-        html_content="<p>This is a test alert from your Growatt monitor.</p>"
+        subject="🔔 Tulia House Solar Alert Test",
+        html_content="<p>This is a test alert from Tulia House solar monitoring system in Champagne Ridge, Kajiado.</p>"
     )
-    return '<p>Test alert sent! ✅ <a href="/">Back</a></p>'
+    return '<html><body style="font-family: Arial; text-align: center; padding: 50px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white;"><h1>✅ Test Alert Sent!</h1><p><a href="/" style="color: white; text-decoration: underline;">← Back to Dashboard</a></p></body></html>'
 
 # ----------------------------
 # Start background polling thread
