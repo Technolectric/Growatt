@@ -17,9 +17,21 @@ API_URL = "https://openapi.growatt.com/v1/device/storage/storage_last_data"
 TOKEN = os.getenv("API_TOKEN")
 SERIAL_NUMBERS = os.getenv("SERIAL_NUMBERS", "").split(",")
 POLL_INTERVAL_MINUTES = int(os.getenv("POLL_INTERVAL_MINUTES", 5))
-LOAD_THRESHOLD_WATTS = int(os.getenv("LOAD_THRESHOLD_WATTS", 1000))
-BATTERY_DISCHARGE_THRESHOLD_W = int(os.getenv("BATTERY_DISCHARGE_THRESHOLD_W", 1000))
-HISTORY_HOURS = 12
+
+# ----------------------------
+# Inverter Configuration
+# ----------------------------
+INVERTER_CONFIG = {
+    "RKG3B0400T": {"label": "Inverter 1", "type": "primary", "datalog": "DDD0B021CC"},
+    "KAM4N5W0AG": {"label": "Inverter 2", "type": "primary", "datalog": "DDD0B02121"},
+    "JNK1CDR0KQ": {"label": "Inverter 3 (Backup)", "type": "backup", "datalog": "DDD0B0221H"}
+}
+
+# Alert thresholds
+PRIMARY_BATTERY_THRESHOLD = 40  # When backup kicks in
+BACKUP_VOLTAGE_THRESHOLD = 51.2  # When generator starts
+BACKUP_CAPACITY_WARNING = 30  # Warn when backup battery is getting low
+TOTAL_SOLAR_CAPACITY_KW = 10
 
 # ----------------------------
 # Location Config (Kajiado, Kenya)
@@ -38,12 +50,11 @@ RECIPIENT_EMAIL = os.getenv('RECIPIENT_EMAIL')
 # Globals
 # ----------------------------
 headers = {"token": TOKEN, "Content-Type": "application/x-www-form-urlencoded"}
-last_alert_time = None
+last_alert_time = {}  # Track different alert types separately
 latest_data = {}
 load_history = []
 battery_history = []
 weather_forecast = {}
-solar_forecast = {}
 
 # East African Timezone
 EAT = timezone(timedelta(hours=3))
@@ -54,12 +65,11 @@ EAT = timezone(timedelta(hours=3))
 def get_weather_forecast():
     """Get weather forecast from Open-Meteo (free, no API key)"""
     try:
-        url = f"https://api.open-meteo.com/v1/forecast?latitude={LATITUDE}&longitude={LONGITUDE}&hourly=cloud_cover,cloud_cover_low,cloud_cover_mid,cloud_cover_high,shortwave_radiation,direct_radiation&timezone=Africa/Nairobi&forecast_days=2"
+        url = f"https://api.open-meteo.com/v1/forecast?latitude={LATITUDE}&longitude={LONGITUDE}&hourly=cloud_cover,shortwave_radiation,direct_radiation&timezone=Africa/Nairobi&forecast_days=2"
         response = requests.get(url, timeout=10)
         response.raise_for_status()
         data = response.json()
         
-        # Parse forecast data
         forecast = {
             'times': data['hourly']['time'],
             'cloud_cover': data['hourly']['cloud_cover'],
@@ -82,7 +92,6 @@ def analyze_solar_conditions(forecast, hours_ahead=10):
         now = datetime.now(EAT)
         future_time = now + timedelta(hours=hours_ahead)
         
-        # Get next 10 hours of forecast
         avg_cloud_cover = 0
         avg_solar_radiation = 0
         count = 0
@@ -113,18 +122,21 @@ def analyze_solar_conditions(forecast, hours_ahead=10):
     return None
 
 # ----------------------------
-# Email function
+# Email function with alert type tracking
 # ----------------------------
-def send_email(subject, html_content):
+def send_email(subject, html_content, alert_type="general"):
     global last_alert_time
     if not all([RESEND_API_KEY, SENDER_EMAIL, RECIPIENT_EMAIL]):
         print("✗ Error: Missing email credentials in env")
         return False
     
-    # Rate limit: 1 email/hour
-    if last_alert_time and datetime.now(EAT) - last_alert_time < timedelta(minutes=60):
-        print("⚠️ Alert cooldown active, skipping email")
-        return False
+    # Rate limit: different cooldowns for different alert types
+    cooldown_minutes = 60 if alert_type != "critical" else 30  # Critical alerts can send more frequently
+    
+    if alert_type in last_alert_time:
+        if datetime.now(EAT) - last_alert_time[alert_type] < timedelta(minutes=cooldown_minutes):
+            print(f"⚠️ Alert cooldown active for {alert_type}, skipping email")
+            return False
     
     email_data = {
         "from": SENDER_EMAIL,
@@ -144,7 +156,7 @@ def send_email(subject, html_content):
         )
         if response.status_code == 200:
             print(f"✓ Email sent: {subject}")
-            last_alert_time = datetime.now(EAT)
+            last_alert_time[alert_type] = datetime.now(EAT)
             return True
         else:
             print(f"✗ Email failed {response.status_code}: {response.text}")
@@ -153,11 +165,159 @@ def send_email(subject, html_content):
         print(f"✗ Error sending email: {e}")
         return False
 
-def can_send_alert():
-    global last_alert_time
-    if last_alert_time is None:
-        return True
-    return datetime.now(EAT) - last_alert_time > timedelta(minutes=60)
+# ----------------------------
+# Intelligent Alert Logic
+# ----------------------------
+def check_and_send_alerts(inverter_data, solar_conditions):
+    """Smart alert logic based on cascade inverter architecture"""
+    
+    # Extract data for each inverter
+    inv1 = next((i for i in inverter_data if i['SN'] == 'RKG3B0400T'), None)
+    inv2 = next((i for i in inverter_data if i['SN'] == 'KAM4N5W0AG'), None)
+    inv3_backup = next((i for i in inverter_data if i['SN'] == 'JNK1CDR0KQ'), None)
+    
+    if not all([inv1, inv2, inv3_backup]):
+        print("⚠️ Not all inverters reporting data")
+        return
+    
+    # Calculate primary battery levels (minimum of Inv1 and Inv2)
+    primary_capacity = min(inv1['Capacity'], inv2['Capacity'])
+    backup_capacity = inv3_backup['Capacity']
+    backup_voltage = inv3_backup['vBat']
+    
+    # Total load across all inverters
+    total_load = inv1['OutputPower'] + inv2['OutputPower'] + inv3_backup['OutputPower']
+    
+    # Check backup inverter status
+    backup_active = inv3_backup['OutputPower'] > 50  # Backup is supplying power
+    
+    # ============================================
+    # CRITICAL ALERT: Generator about to start
+    # ============================================
+    if backup_voltage < 51.2:
+        send_email(
+            subject="🚨 CRITICAL: Generator Starting - Backup Battery Critical",
+            html_content=f"""
+            <div style="font-family: Arial; padding: 20px; background: #fff3cd; border-left: 5px solid #dc3545;">
+                <h2 style="color: #dc3545;">🚨 GENERATOR ACTIVATION IMMINENT</h2>
+                
+                <p><strong>Backup Inverter (Inv 3) Status:</strong></p>
+                <ul>
+                    <li>Battery Voltage: <strong style="color: #dc3545;">{backup_voltage:.1f}V</strong> (Threshold: 51.2V)</li>
+                    <li>Battery Capacity: {backup_capacity:.0f}%</li>
+                    <li>Status: Generator starting or already running</li>
+                </ul>
+                
+                <p><strong>Primary Inverters Status:</strong></p>
+                <ul>
+                    <li>Inverter 1 Battery: {inv1['Capacity']:.0f}%</li>
+                    <li>Inverter 2 Battery: {inv2['Capacity']:.0f}%</li>
+                    <li>Combined Load: {total_load:.0f}W</li>
+                </ul>
+                
+                <p><strong>⚠️ ACTION REQUIRED:</strong></p>
+                <p>The backup battery voltage has dropped below 51.2V. The generator should be starting automatically. 
+                <strong>Reduce all non-essential loads immediately.</strong></p>
+                
+                {f'<p style="color: #dc3545;"><strong>Weather Alert:</strong> Poor solar conditions expected (Cloud: {solar_conditions["avg_cloud_cover"]:.0f}%). Generator may run for extended period.</p>' if solar_conditions and solar_conditions['poor_conditions'] else ''}
+            </div>
+            """,
+            alert_type="critical"
+        )
+    
+    # ============================================
+    # HIGH ALERT: Backup inverter active
+    # ============================================
+    elif backup_active and primary_capacity < PRIMARY_BATTERY_THRESHOLD:
+        send_email(
+            subject="⚠️ HIGH ALERT: Backup Inverter Active - Primary Batteries Low",
+            html_content=f"""
+            <div style="font-family: Arial; padding: 20px; background: #fff3cd; border-left: 5px solid #ff9800;">
+                <h2 style="color: #ff9800;">⚠️ BACKUP SYSTEM ACTIVATED</h2>
+                
+                <p><strong>System Status:</strong></p>
+                <ul>
+                    <li>Backup Inverter (Inv 3): <strong style="color: #ff9800;">ACTIVE</strong> - Supplying {inv3_backup['OutputPower']:.0f}W</li>
+                    <li>Backup Battery: {backup_capacity:.0f}% ({backup_voltage:.1f}V)</li>
+                    <li>Primary Batteries: <strong style="color: #dc3545;">{primary_capacity:.0f}%</strong> (Below 40% threshold)</li>
+                </ul>
+                
+                <p><strong>Individual Inverter Status:</strong></p>
+                <ul>
+                    <li>Inverter 1: {inv1['Capacity']:.0f}% | {inv1['OutputPower']:.0f}W</li>
+                    <li>Inverter 2: {inv2['Capacity']:.0f}% | {inv2['OutputPower']:.0f}W</li>
+                    <li>Total Load: {total_load:.0f}W</li>
+                </ul>
+                
+                <p><strong>⚠️ WARNING:</strong></p>
+                <p>Primary inverter batteries are below 40%. Backup inverter is now supplying power to the primary inverters. 
+                If backup voltage drops below 51.2V, the generator will start automatically.</p>
+                
+                {f'<p style="color: #dc3545;"><strong>Weather Alert:</strong> Poor solar conditions ahead (Cloud: {solar_conditions["avg_cloud_cover"]:.0f}%). Limited recharge expected. Consider reducing load.</p>' if solar_conditions and solar_conditions['poor_conditions'] else f'<p style="color: #28a745;"><strong>Weather:</strong> Good solar conditions expected (Cloud: {solar_conditions["avg_cloud_cover"]:.0f}%). Batteries should recharge.</p>' if solar_conditions else ''}
+            </div>
+            """,
+            alert_type="backup_active"
+        )
+    
+    # ============================================
+    # WARNING: Primary batteries approaching 40%
+    # ============================================
+    elif 40 < primary_capacity < 50:
+        send_email(
+            subject="⚠️ WARNING: Primary Battery Low - Backup Activation Soon",
+            html_content=f"""
+            <div style="font-family: Arial; padding: 20px; background: #fff9e6; border-left: 5px solid #ffc107;">
+                <h2 style="color: #ffc107;">⚠️ PRIMARY BATTERY WARNING</h2>
+                
+                <p><strong>System Status:</strong></p>
+                <ul>
+                    <li>Primary Batteries: <strong style="color: #ff9800;">{primary_capacity:.0f}%</strong> (Approaching 40% threshold)</li>
+                    <li>Inverter 1: {inv1['Capacity']:.0f}%</li>
+                    <li>Inverter 2: {inv2['Capacity']:.0f}%</li>
+                    <li>Backup Battery: {backup_capacity:.0f}% ({backup_voltage:.1f}V)</li>
+                    <li>Total Load: {total_load:.0f}W</li>
+                </ul>
+                
+                <p><strong>Next Stage:</strong></p>
+                <p>When primary batteries drop below 40%, Backup Inverter (Inv 3) will activate to supply power to the primary inverters.</p>
+                
+                {f'<p style="color: #dc3545;"><strong>Weather Alert:</strong> Poor solar forecast (Cloud: {solar_conditions["avg_cloud_cover"]:.0f}%). Consider reducing non-essential loads now.</p>' if solar_conditions and solar_conditions['poor_conditions'] else f'<p style="color: #28a745;"><strong>Weather:</strong> Good conditions expected. Batteries should recover.</p>' if solar_conditions else ''}
+                
+                <p><strong>Recommendation:</strong> Monitor usage and consider reducing high-power loads (AC, water heater).</p>
+            </div>
+            """,
+            alert_type="warning"
+        )
+    
+    # ============================================
+    # INFO: High load but good battery levels
+    # ============================================
+    elif total_load > 2000:  # High total load
+        send_email(
+            subject="ℹ️ INFO: High Power Usage Detected",
+            html_content=f"""
+            <div style="font-family: Arial; padding: 20px; background: #e7f3ff; border-left: 5px solid #2196F3;">
+                <h2 style="color: #2196F3;">ℹ️ HIGH POWER USAGE</h2>
+                
+                <p><strong>Current Status:</strong></p>
+                <ul>
+                    <li>Total Load: <strong>{total_load:.0f}W</strong></li>
+                    <li>Primary Batteries: {primary_capacity:.0f}% (Good)</li>
+                    <li>Backup Battery: {backup_capacity:.0f}%</li>
+                </ul>
+                
+                <p><strong>Individual Loads:</strong></p>
+                <ul>
+                    <li>Inverter 1: {inv1['OutputPower']:.0f}W</li>
+                    <li>Inverter 2: {inv2['OutputPower']:.0f}W</li>
+                    <li>Inverter 3: {inv3_backup['OutputPower']:.0f}W</li>
+                </ul>
+                
+                {f'<p style="color: #28a745;"><strong>Weather:</strong> Good solar conditions expected. System should handle load well.</p>' if solar_conditions and not solar_conditions['poor_conditions'] else f'<p style="color: #ff9800;"><strong>Weather:</strong> Poor solar ahead. Consider moderating usage.</p>' if solar_conditions else ''}
+            </div>
+            """,
+            alert_type="high_load"
+        )
 
 # ----------------------------
 # Growatt Polling Loop
@@ -165,7 +325,6 @@ def can_send_alert():
 def poll_growatt():
     global latest_data, load_history, battery_history, weather_forecast
     
-    # Update weather forecast every 30 minutes
     last_weather_update = None
     
     while True:
@@ -177,11 +336,11 @@ def poll_growatt():
             
             total_output_power = 0
             total_battery_discharge_W = 0
-            total_battery_capacity = 0
             inverter_data = []
             now = datetime.now(EAT)
             
-            battery_capacities = []
+            primary_capacities = []
+            backup_data = None
             
             for sn in SERIAL_NUMBERS:
                 response = requests.post(
@@ -193,103 +352,76 @@ def poll_growatt():
                 response.raise_for_status()
                 data = response.json().get("data", {})
                 
-                # Total output power
+                # Get configuration
+                config = INVERTER_CONFIG.get(sn, {"label": sn, "type": "unknown", "datalog": "N/A"})
+                
+                # Extract key metrics
                 out_power = float(data.get("outPutPower") or 0)
+                capacity = float(data.get("capacity") or 0)
+                v_bat = float(data.get("vBat") or 0)
+                p_bat = float(data.get("pBat") or 0)
+                
                 total_output_power += out_power
                 
-                # Total battery discharge using pBat
-                if "pBat" in data and data["pBat"]:
-                    bat_power = float(data["pBat"])
-                    if bat_power > 0:
-                        total_battery_discharge_W += bat_power
+                if p_bat > 0:
+                    total_battery_discharge_W += p_bat
                 
-                # Battery capacity - collect from specific inverters only
-                capacity = float(data.get("capacity") or 0)
-                if sn in ["KAM4N5W0AG", "RKG3B0400T"]:
-                    if capacity > 0:  # Only add valid readings
-                        battery_capacities.append(capacity)
-                
-                inverter_data.append({
+                inv_info = {
                     "SN": sn,
+                    "Label": config['label'],
+                    "Type": config['type'],
+                    "DataLog": config['datalog'],
                     "OutputPower": out_power,
-                    "pBat": data.get("pBat", 0),
-                    "Capacity": capacity
-                })
+                    "Capacity": capacity,
+                    "vBat": v_bat,
+                    "pBat": p_bat,
+                    "Status": data.get("statusText", "Unknown")
+                }
+                
+                inverter_data.append(inv_info)
+                
+                # Track primary vs backup
+                if config['type'] == 'primary':
+                    if capacity > 0:
+                        primary_capacities.append(capacity)
+                elif config['type'] == 'backup':
+                    backup_data = inv_info
             
-            # Use minimum battery capacity from the specified inverters
-            total_battery_capacity = min(battery_capacities) if battery_capacities else 0
+            # Calculate system-wide metrics
+            primary_battery_min = min(primary_capacities) if primary_capacities else 0
+            backup_battery = backup_data['Capacity'] if backup_data else 0
+            backup_voltage = backup_data['vBat'] if backup_data else 0
+            backup_active = backup_data['OutputPower'] > 50 if backup_data else False
             
             # Save latest readings
             latest_data = {
                 "timestamp": now.strftime("%Y-%m-%d %H:%M:%S EAT"),
                 "total_output_power": total_output_power,
                 "total_battery_discharge_W": total_battery_discharge_W,
-                "battery_capacity": total_battery_capacity,
+                "primary_battery_min": primary_battery_min,
+                "backup_battery": backup_battery,
+                "backup_voltage": backup_voltage,
+                "backup_active": backup_active,
                 "inverters": inverter_data
             }
             
             # Append to history
             load_history.append((now, total_output_power))
-            load_history = [(t, p) for t, p in load_history if t >= now - timedelta(hours=HISTORY_HOURS)]
+            load_history = [(t, p) for t, p in load_history if t >= now - timedelta(hours=12)]
             
             battery_history.append((now, total_battery_discharge_W))
-            battery_history = [(t, p) for t, p in battery_history if t >= now - timedelta(hours=HISTORY_HOURS)]
+            battery_history = [(t, p) for t, p in battery_history if t >= now - timedelta(hours=12)]
             
-            print(f"{latest_data['timestamp']} | Load={total_output_power}W | Battery={total_battery_discharge_W}W | Capacity={total_battery_capacity}%")
+            print(f"{latest_data['timestamp']} | Load={total_output_power:.0f}W | Primary={primary_battery_min:.0f}% | Backup={backup_battery:.0f}% ({backup_voltage:.1f}V) | Backup Active={backup_active}")
             
-            # --- Intelligent Alert Logic ---
+            # Check alerts with solar conditions
             solar_conditions = analyze_solar_conditions(weather_forecast, hours_ahead=10)
-            
-            # Alert if high load + low battery + poor upcoming solar conditions
-            if total_output_power >= LOAD_THRESHOLD_WATTS and total_battery_capacity < 50:
-                if solar_conditions and solar_conditions['poor_conditions']:
-                    if can_send_alert():
-                        send_email(
-                            subject="⚠️ URGENT: High Load + Low Battery + Poor Solar Forecast",
-                            html_content=f"""
-                            <h2>⚠️ Critical Power Alert - Tulia House</h2>
-                            <p><strong>Current Status:</strong></p>
-                            <ul>
-                                <li>Load: {total_output_power} W (Threshold: {LOAD_THRESHOLD_WATTS} W)</li>
-                                <li>Battery: {total_battery_capacity}% (Low!)</li>
-                                <li>Battery Discharge: {total_battery_discharge_W} W</li>
-                            </ul>
-                            <p><strong>Weather Forecast (Next 10 Hours):</strong></p>
-                            <ul>
-                                <li>Cloud Cover: {solar_conditions['avg_cloud_cover']:.0f}% (High!)</li>
-                                <li>Solar Radiation: {solar_conditions['avg_solar_radiation']:.0f} W/m²</li>
-                            </ul>
-                            <p><strong>⚠️ WARNING:</strong> Poor solar conditions expected. Generator may be needed soon. Please reduce power consumption!</p>
-                            """
-                        )
-            
-            # Standard high load alert
-            elif total_output_power >= LOAD_THRESHOLD_WATTS:
-                if can_send_alert():
-                    alert_msg = f"<p>Total Load: {total_output_power} W (Threshold: {LOAD_THRESHOLD_WATTS} W)</p>"
-                    alert_msg += f"<p>Battery: {total_battery_capacity}%</p>"
-                    
-                    if solar_conditions:
-                        if solar_conditions['poor_conditions']:
-                            alert_msg += f"<p>⚠️ Poor solar conditions ahead (Cloud: {solar_conditions['avg_cloud_cover']:.0f}%). Consider reducing usage.</p>"
-                        else:
-                            alert_msg += f"<p>✓ Good solar conditions expected (Cloud: {solar_conditions['avg_cloud_cover']:.0f}%).</p>"
-                    
-                    send_email(
-                        subject="⚠️ Tulia House: High Load Alert",
-                        html_content=alert_msg
-                    )
-            
-            # Battery discharge alert
-            if total_battery_discharge_W >= BATTERY_DISCHARGE_THRESHOLD_W:
-                if can_send_alert():
-                    send_email(
-                        subject="⚠️ Tulia House: High Battery Discharge",
-                        html_content=f"<p>Battery discharge: {total_battery_discharge_W:.0f} W (Threshold: {BATTERY_DISCHARGE_THRESHOLD_W} W)</p><p>Battery Level: {total_battery_capacity}%</p>"
-                    )
+            check_and_send_alerts(inverter_data, solar_conditions)
         
         except Exception as e:
             print(f"❌ Error polling Growatt: {e}")
+            import traceback
+            traceback.print_exc()
         
         time.sleep(POLL_INTERVAL_MINUTES * 60)
 
@@ -298,17 +430,22 @@ def poll_growatt():
 # ----------------------------
 @app.route("/")
 def home():
-    load_color = "red" if latest_data.get("total_output_power", 0) >= LOAD_THRESHOLD_WATTS else "green"
-    battery_color = "red" if latest_data.get("total_battery_discharge_W", 0) >= BATTERY_DISCHARGE_THRESHOLD_W else "green"
-    battery_capacity = latest_data.get("battery_capacity", 0)
-    battery_capacity_color = "red" if battery_capacity < 30 else ("orange" if battery_capacity < 50 else "green")
+    primary_battery = latest_data.get("primary_battery_min", 0)
+    backup_battery = latest_data.get("backup_battery", 0)
+    backup_voltage = latest_data.get("backup_voltage", 0)
+    backup_active = latest_data.get("backup_active", False)
+    total_load = latest_data.get("total_output_power", 0)
     
-    # Prepare chart data
+    # Color coding
+    primary_color = "red" if primary_battery < 40 else ("orange" if primary_battery < 50 else "green")
+    backup_color = "red" if backup_voltage < 51.2 else ("orange" if backup_battery < 30 else "green")
+    
+    # Chart data
     times = [t.strftime('%H:%M') for t, p in load_history]
     load_values = [p for t, p in load_history]
     battery_values = [p for t, p in battery_history]
     
-    # Analyze solar conditions
+    # Solar conditions
     solar_conditions = analyze_solar_conditions(weather_forecast, hours_ahead=10)
     
     html = f"""
@@ -351,14 +488,14 @@ def home():
             opacity: 0.9;
         }}
         
-        .header .location {{
+        .header .specs {{
             font-size: 0.9em;
             opacity: 0.8;
-            margin-top: 5px;
+            margin-top: 10px;
         }}
         
         .container {{ 
-            max-width: 1200px; 
+            max-width: 1400px; 
             margin: 0 auto;
         }}
         
@@ -378,7 +515,25 @@ def home():
             margin-bottom: 20px;
         }}
         
-        .metrics {{
+        .system-status {{
+            background: {'linear-gradient(135deg, #eb3349 0%, #f45c43 100%)' if backup_voltage < 51.2 else 'linear-gradient(135deg, #f77f00 0%, #fcbf49 100%)' if backup_active else 'linear-gradient(135deg, #11998e 0%, #38ef7d 100%)'};
+            color: white;
+            padding: 20px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            text-align: center;
+        }}
+        
+        .system-status h2 {{
+            margin-bottom: 10px;
+            font-size: 1.5em;
+        }}
+        
+        .system-status .status-text {{
+            font-size: 1.1em;
+        }}
+        
+        .metrics-grid {{
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
             gap: 15px;
@@ -409,6 +564,10 @@ def home():
             background: linear-gradient(135deg, #eb3349 0%, #f45c43 100%);
         }}
         
+        .metric.blue {{
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        }}
+        
         .metric-label {{
             font-size: 0.85em;
             opacity: 0.9;
@@ -420,22 +579,25 @@ def home():
             font-weight: bold;
         }}
         
+        .metric-subtext {{
+            font-size: 0.75em;
+            opacity: 0.8;
+            margin-top: 5px;
+        }}
+        
         .weather-alert {{
-            background: linear-gradient(135deg, #f77f00 0%, #fcbf49 100%);
-            color: white;
             padding: 20px;
             border-radius: 10px;
             margin-bottom: 20px;
-            box-shadow: 0 4px 15px rgba(247, 127, 0, 0.3);
+            color: white;
         }}
         
         .weather-alert.good {{
             background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
         }}
         
-        .weather-alert h3 {{
-            margin-bottom: 10px;
-            font-size: 1.2em;
+        .weather-alert.poor {{
+            background: linear-gradient(135deg, #f77f00 0%, #fcbf49 100%);
         }}
         
         h2 {{ 
@@ -445,29 +607,55 @@ def home():
             font-weight: 500;
         }}
         
-        table {{ 
-            width: 100%;
-            border-collapse: collapse;
+        .inverter-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
             margin: 20px 0;
-            background: white;
-            border-radius: 8px;
-            overflow: hidden;
         }}
         
-        th, td {{ 
-            padding: 15px;
-            text-align: left;
+        .inverter-card {{
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            border-left: 5px solid #667eea;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }}
+        
+        .inverter-card.backup {{
+            border-left-color: #f77f00;
+        }}
+        
+        .inverter-card h3 {{
+            color: #333;
+            margin-bottom: 15px;
+            font-size: 1.2em;
+        }}
+        
+        .inverter-card .inv-label {{
+            font-size: 0.9em;
+            color: #666;
+            margin-bottom: 10px;
+        }}
+        
+        .inverter-card .inv-stat {{
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 0;
             border-bottom: 1px solid #eee;
         }}
         
-        th {{ 
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            font-weight: 500;
+        .inverter-card .inv-stat:last-child {{
+            border-bottom: none;
         }}
         
-        tr:hover {{
-            background: #f8f9fa;
+        .inverter-card .inv-stat-label {{
+            color: #666;
+        }}
+        
+        .inverter-card .inv-stat-value {{
+            font-weight: bold;
+            color: #333;
         }}
         
         .chart-container {{ 
@@ -512,79 +700,101 @@ def home():
     <div class="container">
         <div class="header">
             <h1>TULIA HOUSE</h1>
-            <div class="subtitle">🔋 Solar Energy Monitoring System</div>
-            <div class="location">📍 Champagne Ridge, Kajiado • Rift Valley Views</div>
+            <div class="subtitle">☀️ Solar Energy Monitoring System</div>
+            <div class="specs">📍 Champagne Ridge, Kajiado | 🔆 10kW Solar Array | 🔋 Cascade Battery System</div>
         </div>
         
         <div class="card">
             <div class="timestamp">
                 <strong>Last Updated:</strong> {latest_data.get('timestamp', 'N/A')}
             </div>
-"""
-    
-    # Solar forecast alert
-    if solar_conditions:
-        if solar_conditions['poor_conditions']:
-            html += f"""
-            <div class="weather-alert">
-                <h3>☁️ Weather Alert - Poor Solar Conditions Ahead</h3>
-                <p><strong>Next 10 Hours Forecast:</strong></p>
-                <p>• Cloud Cover: {solar_conditions['avg_cloud_cover']:.0f}% (High)</p>
-                <p>• Solar Radiation: {solar_conditions['avg_solar_radiation']:.0f} W/m² (Low)</p>
-                <p><strong>⚠️ Recommendation:</strong> Reduce power consumption to preserve battery. Generator may be needed.</p>
+            
+            <div class="system-status">
+                <h2>{'🚨 GENERATOR ACTIVE / STARTING' if backup_voltage < 51.2 else '⚠️ BACKUP SYSTEM ACTIVE' if backup_active else '✓ NORMAL OPERATION'}</h2>
+                <div class="status-text">
+                    {
+                        'Backup battery voltage critical. Generator should be running.' if backup_voltage < 51.2 else
+                        f'Primary batteries below 40%. Backup inverter supplying {latest_data.get("inverters", [{}])[2].get("OutputPower", 0) if len(latest_data.get("inverters", [])) > 2 else 0:.0f}W to system.' if backup_active else
+                        'All systems operating on primary batteries.'
+                    }
+                </div>
             </div>
 """
-        else:
-            html += f"""
-            <div class="weather-alert good">
-                <h3>☀️ Good Solar Conditions Expected</h3>
-                <p><strong>Next 10 Hours Forecast:</strong></p>
-                <p>• Cloud Cover: {solar_conditions['avg_cloud_cover']:.0f}%</p>
-                <p>• Solar Radiation: {solar_conditions['avg_solar_radiation']:.0f} W/m²</p>
-                <p>✓ Batteries should recharge well</p>
+    
+    # Weather alert
+    if solar_conditions:
+        alert_class = "poor" if solar_conditions['poor_conditions'] else "good"
+        html += f"""
+            <div class="weather-alert {alert_class}">
+                <h3>{'☁️ Poor Solar Conditions Ahead' if solar_conditions['poor_conditions'] else '☀️ Good Solar Conditions Expected'}</h3>
+                <p><strong>Next 10 Hours:</strong> Cloud Cover: {solar_conditions['avg_cloud_cover']:.0f}% | Solar Radiation: {solar_conditions['avg_solar_radiation']:.0f} W/m²</p>
+                {'<p>⚠️ Limited recharge expected. Monitor battery levels closely.</p>' if solar_conditions['poor_conditions'] else '<p>✓ Batteries should recharge well during daylight hours.</p>'}
             </div>
 """
     
     html += f"""
-            <div class="metrics">
-                <div class="metric {load_color}">
-                    <div class="metric-label">Total Load</div>
-                    <div class="metric-value">{latest_data.get('total_output_power', 'N/A')} W</div>
+            <div class="metrics-grid">
+                <div class="metric {primary_color}">
+                    <div class="metric-label">Primary Batteries</div>
+                    <div class="metric-value">{primary_battery:.0f}%</div>
+                    <div class="metric-subtext">Inverters 1 & 2 (Min)</div>
                 </div>
                 
-                <div class="metric {battery_color}">
-                    <div class="metric-label">Battery Discharge</div>
-                    <div class="metric-value">{latest_data.get('total_battery_discharge_W', 'N/A')} W</div>
+                <div class="metric {backup_color}">
+                    <div class="metric-label">Backup Battery</div>
+                    <div class="metric-value">{backup_battery:.0f}%</div>
+                    <div class="metric-subtext">{backup_voltage:.1f}V {'(Generator at 51.2V)' if backup_voltage > 51.2 else '(GENERATOR THRESHOLD!)'}</div>
                 </div>
                 
-                <div class="metric {battery_capacity_color}">
-                    <div class="metric-label">Battery Level</div>
-                    <div class="metric-value">{battery_capacity:.0f}%</div>
+                <div class="metric blue">
+                    <div class="metric-label">Total System Load</div>
+                    <div class="metric-value">{total_load:.0f}W</div>
+                    <div class="metric-subtext">All Inverters</div>
+                </div>
+                
+                <div class="metric {'orange' if backup_active else 'green'}">
+                    <div class="metric-label">Backup Status</div>
+                    <div class="metric-value">{'ACTIVE' if backup_active else 'Standby'}</div>
+                    <div class="metric-subtext">{'Supplying Power' if backup_active else 'Ready'}</div>
                 </div>
             </div>
             
-            <h2>Inverter Status</h2>
-            <table>
-                <tr>
-                    <th>Serial Number</th>
-                    <th>Output (W)</th>
-                    <th>Battery (W)</th>
-                    <th>Capacity (%)</th>
-                </tr>
+            <h2>Inverter Details</h2>
+            <div class="inverter-grid">
 """
     
+    # Display each inverter
     for inv in latest_data.get("inverters", []):
+        is_backup = inv['Type'] == 'backup'
         html += f"""
-                <tr>
-                    <td>{inv['SN']}</td>
-                    <td>{inv['OutputPower']}</td>
-                    <td>{inv['pBat']}</td>
-                    <td>{inv['Capacity']}</td>
-                </tr>
+                <div class="inverter-card {'backup' if is_backup else ''}">
+                    <h3>{inv['Label']}</h3>
+                    <div class="inv-label">SN: {inv['SN']} | DataLog: {inv['DataLog']}</div>
+                    <div class="inv-stat">
+                        <span class="inv-stat-label">Battery Capacity</span>
+                        <span class="inv-stat-value">{inv['Capacity']:.0f}%</span>
+                    </div>
+                    <div class="inv-stat">
+                        <span class="inv-stat-label">Battery Voltage</span>
+                        <span class="inv-stat-value">{inv['vBat']:.1f}V</span>
+                    </div>
+                    <div class="inv-stat">
+                        <span class="inv-stat-label">Output Power</span>
+                        <span class="inv-stat-value">{inv['OutputPower']:.0f}W</span>
+                    </div>
+                    <div class="inv-stat">
+                        <span class="inv-stat-label">Battery Power</span>
+                        <span class="inv-stat-value">{inv['pBat']:.0f}W</span>
+                    </div>
+                    <div class="inv-stat">
+                        <span class="inv-stat-label">Status</span>
+                        <span class="inv-stat-value">{inv['Status']}</span>
+                    </div>
+                </div>
 """
     
     html += """
-            </table>
+            </div>
         </div>
         
         <meta http-equiv="refresh" content="300">
@@ -592,11 +802,11 @@ def home():
         <div class="card">
             <div class="chart-container">
                 <h2>Power Monitoring - Last 12 Hours</h2>
-                <canvas id="mergedChart"></canvas>
+                <canvas id="powerChart"></canvas>
             </div>
             
             <script>
-                const ctx = document.getElementById('mergedChart').getContext('2d');
+                const ctx = document.getElementById('powerChart').getContext('2d');
                 new Chart(ctx, {
                     type: 'line',
                     data: {
@@ -605,11 +815,10 @@ def home():
                             {
                                 label: 'Total Load (W)',
                                 data: """ + str(load_values) + """,
-                                borderColor: 'rgb(17, 153, 142)',
-                                backgroundColor: 'rgba(17, 153, 142, 0.1)',
+                                borderColor: 'rgb(102, 126, 234)',
+                                backgroundColor: 'rgba(102, 126, 234, 0.1)',
                                 borderWidth: 3,
                                 tension: 0.4,
-                                yAxisID: 'y',
                                 fill: true
                             },
                             {
@@ -619,14 +828,12 @@ def home():
                                 backgroundColor: 'rgba(235, 51, 73, 0.1)',
                                 borderWidth: 3,
                                 tension: 0.4,
-                                yAxisID: 'y',
                                 fill: true
                             }
                         ]
                     },
                     options: {
                         responsive: true,
-                        maintainAspectRatio: true,
                         interaction: {
                             mode: 'index',
                             intersect: false
@@ -635,42 +842,17 @@ def home():
                             y: {
                                 type: 'linear',
                                 display: true,
-                                position: 'left',
                                 title: {
                                     display: true,
                                     text: 'Power (W)',
-                                    font: {
-                                        size: 14,
-                                        weight: 'bold'
-                                    }
-                                },
-                                grid: {
-                                    color: 'rgba(0, 0, 0, 0.1)'
-                                }
-                            },
-                            x: {
-                                grid: {
-                                    color: 'rgba(0, 0, 0, 0.05)'
+                                    font: { size: 14, weight: 'bold' }
                                 }
                             }
                         },
                         plugins: {
                             legend: {
                                 display: true,
-                                position: 'top',
-                                labels: {
-                                    font: {
-                                        size: 13
-                                    },
-                                    padding: 15
-                                }
-                            },
-                            tooltip: {
-                                callbacks: {
-                                    label: function(context) {
-                                        return context.dataset.label + ': ' + context.parsed.y.toFixed(0) + ' W';
-                                    }
-                                }
+                                position: 'top'
                             }
                         }
                     }
@@ -683,7 +865,7 @@ def home():
         </div>
         
         <div class="footer">
-            Powered by Growatt Solar • Weather by Open-Meteo • Managed by YourHost
+            10kW Solar System • Cascade Battery Architecture • Managed by YourHost
         </div>
     </div>
 </body>
@@ -695,18 +877,16 @@ def home():
 @app.route("/test_alert", methods=["POST"])
 def test_alert():
     send_email(
-        subject="🔔 Tulia House Solar Alert Test",
-        html_content="<p>This is a test alert from Tulia House solar monitoring system.</p>"
+        subject="🔔 Tulia House Test Alert",
+        html_content="<p>This is a test alert from Tulia House solar monitoring system.</p>",
+        alert_type="test"
     )
-    return '<html><body style="font-family: Arial; text-align: center; padding: 50px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white;"><h1>✅ Test Alert Sent!</h1><p><a href="/" style="color: white; text-decoration: underline;">← Back to Dashboard</a></p></body></html>'
+    return '<html><body style="font-family: Arial; text-align: center; padding: 50px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white;"><h1>✅ Test Alert Sent!</h1><p><a href="/" style="color: white;">← Back</a></p></body></html>'
 
 # ----------------------------
-# Start background polling thread
+# Start
 # ----------------------------
 Thread(target=poll_growatt, daemon=True).start()
 
-# ----------------------------
-# Run Flask
-# ----------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
