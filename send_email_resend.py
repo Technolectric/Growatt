@@ -16,7 +16,6 @@ app = Flask(__name__)
 API_URL = "https://openapi.growatt.com/v1/device/storage/storage_last_data"
 TOKEN = os.getenv("API_TOKEN")
 SERIAL_NUMBERS = os.getenv("SERIAL_NUMBERS", "").split(",")
-
 POLL_INTERVAL_MINUTES = int(os.getenv("POLL_INTERVAL_MINUTES", 5))
 LOAD_THRESHOLD_WATTS = int(os.getenv("LOAD_THRESHOLD_WATTS", 1000))
 BATTERY_DISCHARGE_THRESHOLD_W = int(os.getenv("BATTERY_DISCHARGE_THRESHOLD_W", 1000))  # default 1000 W
@@ -35,8 +34,8 @@ RECIPIENT_EMAIL = os.getenv('RECIPIENT_EMAIL')
 headers = {"token": TOKEN, "Content-Type": "application/x-www-form-urlencoded"}
 last_alert_time = None
 latest_data = {}
-load_history = []      # (timestamp, total_output_power)
-battery_history = []   # (timestamp, total_battery_discharge_W)
+load_history = []  # (timestamp, total_output_power)
+battery_history = []  # (timestamp, total_battery_discharge_W)
 
 # East African Timezone
 EAT = timezone(timedelta(hours=3))
@@ -61,7 +60,7 @@ def send_email(subject, html_content):
         "subject": subject,
         "html": html_content
     }
-
+    
     try:
         response = requests.post(
             "https://api.resend.com/emails",
@@ -96,38 +95,41 @@ def can_send_alert():
 # ----------------------------
 def poll_growatt():
     global latest_data, load_history, battery_history
+    
     while True:
         try:
             total_output_power = 0
             total_battery_discharge_W = 0
             inverter_data = []
-
             now = datetime.now(EAT)
-
+            
             for sn in SERIAL_NUMBERS:
                 response = requests.post(
-                    API_URL, data={"storage_sn": sn}, headers=headers, timeout=20
+                    API_URL,
+                    data={"storage_sn": sn},
+                    headers=headers,
+                    timeout=20
                 )
                 response.raise_for_status()
                 data = response.json().get("data", {})
-
+                
                 # Total output power for charts
                 out_power = float(data.get("outPutPower") or 0)
                 total_output_power += out_power
-
-                # Total battery discharge for alert
-                if "pDischarge" in data and data["pDischarge"]:
-                    total_battery_discharge_W += float(data["pDischarge"])
-                if "pDischarge2" in data and data["pDischarge2"]:
-                    total_battery_discharge_W += float(data["pDischarge2"])
-
+                
+                # Total battery discharge using pBat (actual battery power)
+                if "pBat" in data and data["pBat"]:
+                    bat_power = float(data["pBat"])
+                    # Only count if battery is discharging (positive value means discharge)
+                    if bat_power > 0:
+                        total_battery_discharge_W += bat_power
+                
                 inverter_data.append({
                     "SN": sn,
                     "OutputPower": out_power,
-                    "pDischarge": data.get("pDischarge"),
-                    "pDischarge2": data.get("pDischarge2")
+                    "pBat": data.get("pBat", 0)
                 })
-
+            
             # Save latest readings
             latest_data = {
                 "timestamp": now.strftime("%Y-%m-%d %H:%M:%S EAT"),
@@ -135,24 +137,24 @@ def poll_growatt():
                 "total_battery_discharge_W": total_battery_discharge_W,
                 "inverters": inverter_data
             }
-
+            
             # Append to history (12 hours)
             load_history.append((now, total_output_power))
             load_history = [(t, p) for t, p in load_history if t >= now - timedelta(hours=HISTORY_HOURS)]
-
+            
             battery_history.append((now, total_battery_discharge_W))
             battery_history = [(t, p) for t, p in battery_history if t >= now - timedelta(hours=HISTORY_HOURS)]
-
+            
             print(f"{latest_data['timestamp']} | Load={total_output_power}W | Battery Discharge={total_battery_discharge_W}W")
-
+            
             # --- Load alert ---
             if total_output_power >= LOAD_THRESHOLD_WATTS:
                 if can_send_alert():
                     send_email(
                         subject="⚠️ Growatt Alert: High Load",
-                        html_content=f"<p>Total Load has been above {LOAD_THRESHOLD_WATTS}W.<br>Current: {total_output_power} W</p>"
+                        html_content=f"<p>Total Load has been above {LOAD_THRESHOLD_WATTS}W. Current: {total_output_power} W</p>"
                     )
-
+            
             # --- Battery discharge alert ---
             if total_battery_discharge_W >= BATTERY_DISCHARGE_THRESHOLD_W:
                 if can_send_alert():
@@ -160,10 +162,10 @@ def poll_growatt():
                         subject="⚠️ Growatt Alert: High Battery Discharge",
                         html_content=f"<p>Total battery discharge is {total_battery_discharge_W:.0f} W, exceeding the threshold of {BATTERY_DISCHARGE_THRESHOLD_W} W.</p>"
                     )
-
+        
         except Exception as e:
             print(f"❌ Error polling Growatt: {e}")
-
+        
         time.sleep(POLL_INTERVAL_MINUTES * 60)
 
 # ----------------------------
@@ -173,108 +175,151 @@ def poll_growatt():
 def home():
     load_color = "red" if latest_data.get("total_output_power", 0) >= LOAD_THRESHOLD_WATTS else "green"
     battery_color = "red" if latest_data.get("total_battery_discharge_W", 0) >= BATTERY_DISCHARGE_THRESHOLD_W else "green"
-
-    # Prepare data for charts
-    load_times = [t.strftime('%H:%M') for t, p in load_history]
+    
+    # Prepare data for merged chart
+    times = [t.strftime('%H:%M') for t, p in load_history]
     load_values = [p for t, p in load_history]
-
-    battery_times = [t.strftime('%H:%M') for t, p in battery_history]
     battery_values = [p for t, p in battery_history]
-
+    
     html = f"""
-    <h2>Growatt Monitor</h2>
-    <p>Last updated: {latest_data.get('timestamp', 'N/A')}</p>
-    <p>Total Output Power: <span style="color:{load_color}">{latest_data.get('total_output_power', 'N/A')} W</span></p>
-    <p>Total Battery Discharge: <span style="color:{battery_color}">{latest_data.get('total_battery_discharge_W', 'N/A')} W</span></p>
-
-    <h3>Per Inverter Data</h3>
-    <table border="1" cellpadding="5" cellspacing="0">
-        <tr>
-            <th>SN</th>
-            <th>Output Power (W)</th>
-            <th>pDischarge (W)</th>
-            <th>pDischarge2 (W)</th>
-        </tr>
-    """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Growatt Monitor</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body {{ font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }}
+        .container {{ max-width: 1200px; margin: 0 auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+        h1 {{ color: #333; }}
+        .metric {{ display: inline-block; margin: 15px 20px; padding: 15px; border-radius: 5px; background: #f9f9f9; }}
+        .metric.red {{ border-left: 4px solid red; }}
+        .metric.green {{ border-left: 4px solid green; }}
+        table {{ width: 100%; border-collapse: collapse; margin: 20px 0; }}
+        th, td {{ padding: 10px; text-align: left; border-bottom: 1px solid #ddd; }}
+        th {{ background: #333; color: white; }}
+        .chart-container {{ margin: 30px 0; }}
+        canvas {{ max-height: 400px; }}
+        button {{ background: #007bff; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; margin: 10px 0; }}
+        button:hover {{ background: #0056b3; }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔋 Growatt Monitor</h1>
+        <p><strong>Last updated:</strong> {latest_data.get('timestamp', 'N/A')}</p>
+        
+        <div class="metric {load_color}">
+            <strong>Total Output Power:</strong> {latest_data.get('total_output_power', 'N/A')} W
+        </div>
+        
+        <div class="metric {battery_color}">
+            <strong>Total Battery Discharge:</strong> {latest_data.get('total_battery_discharge_W', 'N/A')} W
+        </div>
+        
+        <h2>Per Inverter Data</h2>
+        <table>
+            <tr>
+                <th>SN</th>
+                <th>Output Power (W)</th>
+                <th>Battery Power (W)</th>
+            </tr>
+"""
+    
     for inv in latest_data.get("inverters", []):
         html += f"""
-        <tr>
-            <td>{inv['SN']}</td>
-            <td>{inv['OutputPower']}</td>
-            <td>{inv['pDischarge'] or 0}</td>
-            <td>{inv['pDischarge2'] or 0}</td>
-        </tr>
-        """
-    html += "</table><br>"
-
+            <tr>
+                <td>{inv['SN']}</td>
+                <td>{inv['OutputPower']}</td>
+                <td>{inv['pBat']}</td>
+            </tr>
+"""
+    
+    html += """
+        </table>
+"""
+    
     # Auto-refresh every 5 minutes
     html += """
-    <script>
-      setTimeout(() => { window.location.reload(); }, 300000);
-    </script>
-    """
-
-    # Chart.js scripts
+        <meta http-equiv="refresh" content="300">
+"""
+    
+    # Merged Chart
     html += f"""
-    <h3>Total Load (W) - Last 12 hours</h3>
-    <canvas id="loadChart" width="800" height="300"></canvas>
-    <h3>Total Battery Discharge (W) - Last 12 hours</h3>
-    <canvas id="batteryChart" width="800" height="300"></canvas>
-
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <script>
-    const loadCtx = document.getElementById('loadChart').getContext('2d');
-    const loadChart = new Chart(loadCtx, {{
-        type: 'line',
-        data: {{
-            labels: {load_times},
-            datasets: [{{
-                label: 'Total Load (W)',
-                data: {load_values},
-                borderColor: 'blue',
-                backgroundColor: 'rgba(0, 0, 255, 0.1)',
-                fill: true,
-                tension: 0.3
-            }}]
-        }},
-        options: {{
-            responsive: true,
-            scales: {{
-                x: {{ title: {{ display: true, text: 'Time (EAT)' }} }},
-                y: {{ title: {{ display: true, text: 'Watts' }} }}
-            }}
-        }}
-    }});
-
-    const batteryCtx = document.getElementById('batteryChart').getContext('2d');
-    const batteryChart = new Chart(batteryCtx, {{
-        type: 'line',
-        data: {{
-            labels: {battery_times},
-            datasets: [{{
-                label: 'Total Battery Discharge (W)',
-                data: {battery_values},
-                borderColor: 'orange',
-                backgroundColor: 'rgba(255, 165, 0, 0.1)',
-                fill: true,
-                tension: 0.3
-            }}]
-        }},
-        options: {{
-            responsive: true,
-            scales: {{
-                x: {{ title: {{ display: true, text: 'Time (EAT)' }} }},
-                y: {{ title: {{ display: true, text: 'Watts' }} }}
-            }}
-        }}
-    }});
-    </script>
-
-    <form action="/test_alert" method="post">
-        <button type="submit">Send Test Alert Email</button>
-    </form>
-    """
-
+        <div class="chart-container">
+            <h2>Power Monitoring - Last 12 Hours</h2>
+            <canvas id="mergedChart"></canvas>
+        </div>
+        
+        <script>
+            const ctx = document.getElementById('mergedChart').getContext('2d');
+            new Chart(ctx, {{
+                type: 'line',
+                data: {{
+                    labels: {times},
+                    datasets: [
+                        {{
+                            label: 'Total Load (W)',
+                            data: {load_values},
+                            borderColor: 'rgb(75, 192, 192)',
+                            backgroundColor: 'rgba(75, 192, 192, 0.1)',
+                            borderWidth: 2,
+                            tension: 0.1,
+                            yAxisID: 'y'
+                        }},
+                        {{
+                            label: 'Battery Discharge (W)',
+                            data: {battery_values},
+                            borderColor: 'rgb(255, 99, 132)',
+                            backgroundColor: 'rgba(255, 99, 132, 0.1)',
+                            borderWidth: 2,
+                            tension: 0.1,
+                            yAxisID: 'y'
+                        }}
+                    ]
+                }},
+                options: {{
+                    responsive: true,
+                    maintainAspectRatio: true,
+                    interaction: {{
+                        mode: 'index',
+                        intersect: false
+                    }},
+                    scales: {{
+                        y: {{
+                            type: 'linear',
+                            display: true,
+                            position: 'left',
+                            title: {{
+                                display: true,
+                                text: 'Power (W)'
+                            }}
+                        }}
+                    }},
+                    plugins: {{
+                        legend: {{
+                            display: true,
+                            position: 'top'
+                        }},
+                        tooltip: {{
+                            callbacks: {{
+                                label: function(context) {{
+                                    return context.dataset.label + ': ' + context.parsed.y.toFixed(0) + ' W';
+                                }}
+                            }}
+                        }}
+                    }}
+                }}
+            }});
+        </script>
+        
+        <form method="POST" action="/test_alert">
+            <button type="submit">Send Test Alert Email</button>
+        </form>
+    </div>
+</body>
+</html>
+"""
+    
     return render_template_string(html)
 
 @app.route("/test_alert", methods=["POST"])
@@ -283,7 +328,7 @@ def test_alert():
         subject="🔔 Growatt Test Alert",
         html_content="<p>This is a test alert from your Growatt monitor.</p>"
     )
-    return "<p>Test alert sent! ✅ <a href='/'>Back</a></p>"
+    return '<p>Test alert sent! ✅ <a href="/">Back</a></p>'
 
 # ----------------------------
 # Start background polling thread
