@@ -181,6 +181,8 @@ def poll_growatt():
             inverter_data = []
             now = datetime.now(EAT)
             
+            battery_capacities = []
+            
             for sn in SERIAL_NUMBERS:
                 response = requests.post(
                     API_URL,
@@ -201,9 +203,11 @@ def poll_growatt():
                     if bat_power > 0:
                         total_battery_discharge_W += bat_power
                 
-                # Battery capacity
+                # Battery capacity - collect from specific inverters only
                 capacity = float(data.get("capacity") or 0)
-                total_battery_capacity = max(total_battery_capacity, capacity)
+                if sn in ["KAM4N5W0AG", "RKG3B0400T"]:
+                    if capacity > 0:  # Only add valid readings
+                        battery_capacities.append(capacity)
                 
                 inverter_data.append({
                     "SN": sn,
@@ -211,6 +215,9 @@ def poll_growatt():
                     "pBat": data.get("pBat", 0),
                     "Capacity": capacity
                 })
+            
+            # Use minimum battery capacity from the specified inverters
+            total_battery_capacity = min(battery_capacities) if battery_capacities else 0
             
             # Save latest readings
             latest_data = {
