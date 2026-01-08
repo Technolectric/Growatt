@@ -19,10 +19,8 @@ SERIAL_NUMBERS = os.getenv("SERIAL_NUMBERS", "").split(",")
 
 POLL_INTERVAL_MINUTES = int(os.getenv("POLL_INTERVAL_MINUTES", 5))
 LOAD_THRESHOLD_WATTS = int(os.getenv("LOAD_THRESHOLD_WATTS", 1000))
-LOAD_DURATION_HOURS = int(os.getenv("LOAD_DURATION_HOURS", 2))
-BATTERY_THRESHOLD_PERCENT = int(os.getenv("BATTERY_THRESHOLD_PERCENT", 40))
-ALERT_COOLDOWN_MINUTES = int(os.getenv("ALERT_COOLDOWN_MINUTES", 60))
-HISTORY_HOURS = 12  # 12-hour load history
+BATTERY_DISCHARGE_THRESHOLD_W = int(os.getenv("BATTERY_DISCHARGE_THRESHOLD_W", 1000))  # default 1000 W
+HISTORY_HOURS = 12  # 12-hour history
 
 # ----------------------------
 # Email (Resend) Config
@@ -35,10 +33,10 @@ RECIPIENT_EMAIL = os.getenv('RECIPIENT_EMAIL')
 # Globals
 # ----------------------------
 headers = {"token": TOKEN, "Content-Type": "application/x-www-form-urlencoded"}
-high_load_start = None
 last_alert_time = None
 latest_data = {}
-load_history = []  # store tuples: (timestamp, total_load)
+load_history = []      # (timestamp, total_output_power)
+battery_history = []   # (timestamp, total_battery_discharge_W)
 
 # East African Timezone
 EAT = timezone(timedelta(hours=3))
@@ -52,8 +50,8 @@ def send_email(subject, html_content):
         print("✗ Error: Missing email credentials in env")
         return False
     
-    # Rate limit
-    if last_alert_time and datetime.now(EAT) - last_alert_time < timedelta(minutes=ALERT_COOLDOWN_MINUTES):
+    # Rate limit: 1 email/hour
+    if last_alert_time and datetime.now(EAT) - last_alert_time < timedelta(minutes=60):
         print("⚠️ Alert cooldown active, skipping email")
         return False
     
@@ -85,23 +83,23 @@ def send_email(subject, html_content):
         return False
 
 # ----------------------------
-# Helper: Can send alert?
+# Can send alert helper
 # ----------------------------
 def can_send_alert():
     global last_alert_time
     if last_alert_time is None:
         return True
-    return datetime.now(EAT) - last_alert_time > timedelta(minutes=ALERT_COOLDOWN_MINUTES)
+    return datetime.now(EAT) - last_alert_time > timedelta(minutes=60)
 
 # ----------------------------
 # Growatt Polling Loop
 # ----------------------------
 def poll_growatt():
-    global high_load_start, latest_data, load_history
+    global latest_data, load_history, battery_history
     while True:
         try:
             total_output_power = 0
-            battery_percent = None
+            total_battery_discharge_W = 0
             inverter_data = []
 
             now = datetime.now(EAT)
@@ -112,52 +110,55 @@ def poll_growatt():
                 )
                 response.raise_for_status()
                 data = response.json().get("data", {})
-                out_power = data.get("outPutPower", 0)
-                soc = data.get("soc") or data.get("capacity")
+
+                # Total output power for charts
+                out_power = float(data.get("outPutPower") or 0)
                 total_output_power += out_power
 
-                if sn.startswith("KAM"):
-                    battery_percent = soc
+                # Total battery discharge for alert
+                if "pDischarge" in data and data["pDischarge"]:
+                    total_battery_discharge_W += float(data["pDischarge"])
+                if "pDischarge2" in data and data["pDischarge2"]:
+                    total_battery_discharge_W += float(data["pDischarge2"])
 
                 inverter_data.append({
                     "SN": sn,
                     "OutputPower": out_power,
-                    "BatterySOC": soc
+                    "pDischarge": data.get("pDischarge"),
+                    "pDischarge2": data.get("pDischarge2")
                 })
 
             # Save latest readings
             latest_data = {
                 "timestamp": now.strftime("%Y-%m-%d %H:%M:%S EAT"),
                 "total_output_power": total_output_power,
-                "battery_percent": battery_percent,
+                "total_battery_discharge_W": total_battery_discharge_W,
                 "inverters": inverter_data
             }
 
-            # Save to 12-hour history
+            # Append to history (12 hours)
             load_history.append((now, total_output_power))
             load_history = [(t, p) for t, p in load_history if t >= now - timedelta(hours=HISTORY_HOURS)]
 
-            print(f"{latest_data['timestamp']} | Load={total_output_power}W | Battery={battery_percent}%")
+            battery_history.append((now, total_battery_discharge_W))
+            battery_history = [(t, p) for t, p in battery_history if t >= now - timedelta(hours=HISTORY_HOURS)]
 
-            # --- Load Alert ---
+            print(f"{latest_data['timestamp']} | Load={total_output_power}W | Battery Discharge={total_battery_discharge_W}W")
+
+            # --- Load alert ---
             if total_output_power >= LOAD_THRESHOLD_WATTS:
-                if high_load_start is None:
-                    high_load_start = now
-                elif now - high_load_start >= timedelta(hours=LOAD_DURATION_HOURS):
-                    if can_send_alert():
-                        send_email(
-                            subject="⚠️ Growatt Alert: High Load",
-                            html_content=f"<p>Total Load has been above {LOAD_THRESHOLD_WATTS}W for {LOAD_DURATION_HOURS} hours.<br>Current: {total_output_power}W</p>"
-                        )
-            else:
-                high_load_start = None
-
-            # --- Battery Alert ---
-            if battery_percent is not None and battery_percent <= BATTERY_THRESHOLD_PERCENT:
                 if can_send_alert():
                     send_email(
-                        subject="⚠️ Growatt Alert: Low Battery",
-                        html_content=f"<p>Battery percentage is low: {battery_percent}% (Threshold: {BATTERY_THRESHOLD_PERCENT}%)</p>"
+                        subject="⚠️ Growatt Alert: High Load",
+                        html_content=f"<p>Total Load has been above {LOAD_THRESHOLD_WATTS}W.<br>Current: {total_output_power} W</p>"
+                    )
+
+            # --- Battery discharge alert ---
+            if total_battery_discharge_W >= BATTERY_DISCHARGE_THRESHOLD_W:
+                if can_send_alert():
+                    send_email(
+                        subject="⚠️ Growatt Alert: High Battery Discharge",
+                        html_content=f"<p>Total battery discharge is {total_battery_discharge_W:.0f} W, exceeding the threshold of {BATTERY_DISCHARGE_THRESHOLD_W} W.</p>"
                     )
 
         except Exception as e:
@@ -170,57 +171,105 @@ def poll_growatt():
 # ----------------------------
 @app.route("/")
 def home():
-    # Colors for indicators
     load_color = "red" if latest_data.get("total_output_power", 0) >= LOAD_THRESHOLD_WATTS else "green"
-    battery_color = "red" if latest_data.get("battery_percent", 100) <= BATTERY_THRESHOLD_PERCENT else "green"
+    battery_color = "red" if latest_data.get("total_battery_discharge_W", 0) >= BATTERY_DISCHARGE_THRESHOLD_W else "green"
+
+    # Prepare data for charts
+    load_times = [t.strftime('%H:%M') for t, p in load_history]
+    load_values = [p for t, p in load_history]
+
+    battery_times = [t.strftime('%H:%M') for t, p in battery_history]
+    battery_values = [p for t, p in battery_history]
 
     html = f"""
     <h2>Growatt Monitor</h2>
     <p>Last updated: {latest_data.get('timestamp', 'N/A')}</p>
     <p>Total Output Power: <span style="color:{load_color}">{latest_data.get('total_output_power', 'N/A')} W</span></p>
-    <p>KAM Battery: <span style="color:{battery_color}">{latest_data.get('battery_percent', 'N/A')}%</span></p>
+    <p>Total Battery Discharge: <span style="color:{battery_color}">{latest_data.get('total_battery_discharge_W', 'N/A')} W</span></p>
 
     <h3>Per Inverter Data</h3>
     <table border="1" cellpadding="5" cellspacing="0">
         <tr>
             <th>SN</th>
             <th>Output Power (W)</th>
-            <th>Battery SOC (%)</th>
+            <th>pDischarge (W)</th>
+            <th>pDischarge2 (W)</th>
         </tr>
     """
-
     for inv in latest_data.get("inverters", []):
-        inv_color = "red" if (inv['BatterySOC'] is not None and inv['BatterySOC'] <= BATTERY_THRESHOLD_PERCENT) else "green"
         html += f"""
         <tr>
             <td>{inv['SN']}</td>
             <td>{inv['OutputPower']}</td>
-            <td style="color:{inv_color}">{inv['BatterySOC']}</td>
+            <td>{inv['pDischarge'] or 0}</td>
+            <td>{inv['pDischarge2'] or 0}</td>
         </tr>
         """
-
     html += "</table><br>"
 
-    # Load History Table
+    # Auto-refresh every 5 minutes
     html += """
-    <h3>Load History (Last 12 hours)</h3>
-    <table border="1" cellpadding="5" cellspacing="0">
-        <tr>
-            <th>Time (EAT)</th>
-            <th>Total Load (W)</th>
-        </tr>
+    <script>
+      setTimeout(() => { window.location.reload(); }, 300000);
+    </script>
     """
-    for t, p in reversed(load_history):  # latest first
-        html += f"""
-        <tr>
-            <td>{t.strftime('%Y-%m-%d %H:%M:%S')}</td>
-            <td>{p}</td>
-        </tr>
-        """
-    html += "</table><br>"
 
-    # Manual test alert button
-    html += """
+    # Chart.js scripts
+    html += f"""
+    <h3>Total Load (W) - Last 12 hours</h3>
+    <canvas id="loadChart" width="800" height="300"></canvas>
+    <h3>Total Battery Discharge (W) - Last 12 hours</h3>
+    <canvas id="batteryChart" width="800" height="300"></canvas>
+
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script>
+    const loadCtx = document.getElementById('loadChart').getContext('2d');
+    const loadChart = new Chart(loadCtx, {{
+        type: 'line',
+        data: {{
+            labels: {load_times},
+            datasets: [{{
+                label: 'Total Load (W)',
+                data: {load_values},
+                borderColor: 'blue',
+                backgroundColor: 'rgba(0, 0, 255, 0.1)',
+                fill: true,
+                tension: 0.3
+            }}]
+        }},
+        options: {{
+            responsive: true,
+            scales: {{
+                x: {{ title: {{ display: true, text: 'Time (EAT)' }} }},
+                y: {{ title: {{ display: true, text: 'Watts' }} }}
+            }}
+        }}
+    }});
+
+    const batteryCtx = document.getElementById('batteryChart').getContext('2d');
+    const batteryChart = new Chart(batteryCtx, {{
+        type: 'line',
+        data: {{
+            labels: {battery_times},
+            datasets: [{{
+                label: 'Total Battery Discharge (W)',
+                data: {battery_values},
+                borderColor: 'orange',
+                backgroundColor: 'rgba(255, 165, 0, 0.1)',
+                fill: true,
+                tension: 0.3
+            }}]
+        }},
+        options: {{
+            responsive: true,
+            scales: {{
+                x: {{ title: {{ display: true, text: 'Time (EAT)' }} }},
+                y: {{ title: {{ display: true, text: 'Watts' }} }}
+            }}
+        }}
+    }});
+    </script>
+
     <form action="/test_alert" method="post">
         <button type="submit">Send Test Alert Email</button>
     </form>
