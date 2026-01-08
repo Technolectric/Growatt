@@ -1,7 +1,7 @@
 import os
 import time
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from threading import Thread
 from flask import Flask, render_template_string, request
 
@@ -48,7 +48,7 @@ def send_email(subject, html_content):
         return False
     
     # Rate limit
-    if last_alert_time and datetime.utcnow() - last_alert_time < timedelta(minutes=ALERT_COOLDOWN_MINUTES):
+    if last_alert_time and datetime.now(timezone.utc) - last_alert_time < timedelta(minutes=ALERT_COOLDOWN_MINUTES):
         print("⚠️ Alert cooldown active, skipping email")
         return False
     
@@ -70,7 +70,7 @@ def send_email(subject, html_content):
         )
         if response.status_code == 200:
             print(f"✓ Email sent: {subject}")
-            last_alert_time = datetime.utcnow()
+            last_alert_time = datetime.now(timezone.utc)
             return True
         else:
             print(f"✗ Email failed {response.status_code}: {response.text}")
@@ -86,7 +86,7 @@ def can_send_alert():
     global last_alert_time
     if last_alert_time is None:
         return True
-    return datetime.utcnow() - last_alert_time > timedelta(minutes=ALERT_COOLDOWN_MINUTES)
+    return datetime.now(timezone.utc) - last_alert_time > timedelta(minutes=ALERT_COOLDOWN_MINUTES)
 
 # ----------------------------
 # Growatt Polling Loop
@@ -120,7 +120,7 @@ def poll_growatt():
 
             # Save latest readings for web display
             latest_data = {
-                "timestamp": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
+                "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
                 "total_output_power": total_output_power,
                 "battery_percent": battery_percent,
                 "inverters": inverter_data
@@ -131,8 +131,8 @@ def poll_growatt():
             # --- Load Alert ---
             if total_output_power >= LOAD_THRESHOLD_WATTS:
                 if high_load_start is None:
-                    high_load_start = datetime.utcnow()
-                elif datetime.utcnow() - high_load_start >= timedelta(hours=LOAD_DURATION_HOURS):
+                    high_load_start = datetime.now(timezone.utc)
+                elif datetime.now(timezone.utc) - high_load_start >= timedelta(hours=LOAD_DURATION_HOURS):
                     if can_send_alert():
                         send_email(
                             subject="⚠️ Growatt Alert: High Load",
@@ -157,10 +157,9 @@ def poll_growatt():
 # ----------------------------
 # Flask Web Routes
 # ----------------------------
-
 @app.route("/")
 def home():
-    # Determine color for total load
+    # Determine color for total load and battery
     load_color = "red" if latest_data.get("total_output_power", 0) >= LOAD_THRESHOLD_WATTS else "green"
     battery_color = "red" if latest_data.get("battery_percent", 100) <= BATTERY_THRESHOLD_PERCENT else "green"
 
