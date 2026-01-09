@@ -708,3 +708,508 @@ def poll_growatt():
                             inverter_data.append({
                                 "SN": sn,
                                 "Label": config.get('label', sn),
+                                "Type": config.get('type', 'unknown'),
+                                "DisplayOrder": config.get('display_order', 99),
+                                "communication_lost": True,
+                                "last_seen": last_communication[sn].strftime("%Y-%m-%d %H:%M:%S")
+                            })
+            
+            # Sort inverters by display order
+            inverter_data.sort(key=lambda x: x.get('DisplayOrder', 99))
+            
+            # Calculate system metrics
+            primary_battery_min = min(primary_capacities) if primary_capacities else 0
+            backup_battery_voltage = backup_data['vBat'] if backup_data else 0
+            backup_voltage_status, backup_voltage_color = get_backup_voltage_status(backup_battery_voltage)
+            backup_active = backup_data['OutputPower'] > 50 if backup_data else False
+            
+            # Save latest data
+            latest_data = {
+                "timestamp": now.strftime("%Y-%m-%d %H:%M:%S EAT"),
+                "total_output_power": total_output_power,
+                "total_battery_discharge_W": total_battery_discharge_W,
+                "total_solar_input_W": total_solar_input_W,
+                "primary_battery_min": primary_battery_min,
+                "backup_battery_voltage": backup_battery_voltage,
+                "backup_voltage_status": backup_voltage_status,
+                "backup_voltage_color": backup_voltage_color,
+                "backup_active": backup_active,
+                "generator_running": generator_running,
+                "inverters": inverter_data
+            }
+            
+            # Append to history
+            load_history.append((now, total_output_power))
+            load_history = [(t, p) for t, p in load_history if t >= now - timedelta(hours=12)]
+            
+            battery_history.append((now, total_battery_discharge_W))
+            battery_history = [(t, p) for t, p in battery_history if t >= now - timedelta(hours=12)]
+            
+            print(f"{latest_data['timestamp']} | Load={total_output_power:.0f}W | Solar={total_solar_input_W:.0f}W | Battery Discharge={total_battery_discharge_W:.0f}W | Primary={primary_battery_min:.0f}% | Backup={backup_battery_voltage:.1f}V | Gen={'ON' if generator_running else 'OFF'}")
+            
+            # Check alerts with solar-aware logic
+            solar_conditions = analyze_solar_conditions(weather_forecast)
+            check_and_send_alerts(inverter_data, solar_conditions, total_solar_input_W, total_battery_discharge_W, generator_running)
+        
+        except Exception as e:
+            print(f"❌ Error in polling loop: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        time.sleep(POLL_INTERVAL_MINUTES * 60)
+
+# ----------------------------
+# Flask Web Routes
+# ----------------------------
+@app.route("/refresh_weather")
+def refresh_weather():
+    """Manual trigger to refresh weather"""
+    global weather_forecast
+    weather_forecast = get_weather_forecast()
+    return jsonify(weather_debug)
+
+@app.route("/")
+def home():
+    primary_battery = latest_data.get("primary_battery_min", 0)
+    backup_voltage = latest_data.get("backup_battery_voltage", 0)
+    backup_voltage_status = latest_data.get("backup_voltage_status", "Unknown")
+    backup_voltage_color = latest_data.get("backup_voltage_color", "gray")
+    backup_active = latest_data.get("backup_active", False)
+    generator_running = latest_data.get("generator_running", False)
+    total_load = latest_data.get("total_output_power", 0)
+    total_solar = latest_data.get("total_solar_input_W", 0)
+    total_battery_discharge = latest_data.get("total_battery_discharge_W", 0)
+    
+    # Color coding
+    primary_color = "red" if primary_battery < 40 else ("orange" if primary_battery < 50 else "green")
+    
+    # Chart data
+    times = [t.strftime('%H:%M') for t, p in load_history]
+    load_values = [p for t, p in load_history]
+    battery_values = [p for t, p in battery_history]
+    
+    # Solar conditions - with fallback
+    solar_conditions = analyze_solar_conditions(weather_forecast)
+    
+    html = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Tulia House - Solar Monitor</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        * {{
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }}
+        
+        body {{ 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(rgba(0, 0, 0, 0.4), rgba(0, 0, 0, 0.6)), 
+                        url('https://images.unsplash.com/photo-1582268611958-ebfd161ef9cf?w=1600&q=80') center/cover fixed;
+            min-height: 100vh;
+            padding: 20px;
+        }}
+        
+        .header {{
+            text-align: center;
+            color: white;
+            margin-bottom: 30px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.7);
+        }}
+        
+        .header h1 {{
+            font-size: 2.5em;
+            margin-bottom: 5px;
+            font-weight: 300;
+            letter-spacing: 2px;
+        }}
+        
+        .header .subtitle {{
+            font-size: 1.1em;
+            opacity: 0.9;
+        }}
+        
+        .header .specs {{
+            font-size: 0.9em;
+            opacity: 0.8;
+            margin-top: 10px;
+        }}
+        
+        .container {{ 
+            max-width: 1400px; 
+            margin: 0 auto;
+        }}
+        
+        .card {{
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+            padding: 25px;
+            border-radius: 15px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+            margin-bottom: 20px;
+        }}
+        
+        .timestamp {{
+            text-align: center;
+            color: #666;
+            font-size: 0.95em;
+            margin-bottom: 20px;
+        }}
+        
+        .system-status {{
+            color: white;
+            padding: 20px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            text-align: center;
+        }}
+        
+        .system-status.normal {{
+            background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
+        }}
+        
+        .system-status.warning {{
+            background: linear-gradient(135deg, #f77f00 0%, #fcbf49 100%);
+        }}
+        
+        .system-status.critical {{
+            background: linear-gradient(135deg, #eb3349 0%, #f45c43 100%);
+        }}
+        
+        .system-status h2 {{
+            margin-bottom: 10px;
+            font-size: 1.5em;
+        }}
+        
+        .weather-alert {{
+            padding: 20px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            color: white;
+        }}
+        
+        .weather-alert.good {{
+            background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
+        }}
+        
+        .weather-alert.poor {{
+            background: linear-gradient(135deg, #f77f00 0%, #fcbf49 100%);
+        }}
+        
+        .weather-alert.error {{
+            background: linear-gradient(135deg, #757F9A 0%, #D7DDE8 100%);
+            color: #333;
+            border-left: 5px solid #dc3545;
+        }}
+        
+        h2 {{ 
+            color: #333;
+            margin-bottom: 20px;
+            font-size: 1.5em;
+            font-weight: 500;
+        }}
+        
+        .metrics-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 15px;
+            margin-bottom: 30px;
+        }}
+        
+        .metric {{
+            padding: 20px;
+            border-radius: 10px;
+            color: white;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
+            transition: transform 0.2s;
+        }}
+        
+        .metric:hover {{
+            transform: translateY(-5px);
+        }}
+        
+        .metric.green {{
+            background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
+        }}
+        
+        .metric.orange {{
+            background: linear-gradient(135deg, #f77f00 0%, #fcbf49 100%);
+        }}
+        
+        .metric.red {{
+            background: linear-gradient(135deg, #eb3349 0%, #f45c43 100%);
+        }}
+        
+        .metric.blue {{
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        }}
+        
+        .metric.gray {{
+            background: linear-gradient(135deg, #757F9A 0%, #D7DDE8 100%);
+        }}
+        
+        .metric-label {{
+            font-size: 0.85em;
+            opacity: 0.9;
+            margin-bottom: 8px;
+        }}
+        
+        .metric-value {{
+            font-size: 1.8em;
+            font-weight: bold;
+        }}
+        
+        .metric-subtext {{
+            font-size: 0.75em;
+            opacity: 0.8;
+            margin-top: 5px;
+        }}
+        
+        .inverter-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin: 20px 0;
+        }}
+        
+        .inverter-card {{
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            border-left: 5px solid #667eea;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }}
+        
+        .inverter-card.backup {{
+            border-left-color: #f77f00;
+            background: #fff9f0;
+        }}
+        
+        .inverter-card.offline {{
+            border-left-color: #dc3545;
+            background: #fff0f0;
+        }}
+        
+        .inverter-card h3 {{
+            color: #333;
+            margin-bottom: 10px;
+            font-size: 1.4em;
+            font-weight: 600;
+        }}
+        
+        .inverter-card .inv-label {{
+            font-size: 0.85em;
+            color: #666;
+            margin-bottom: 15px;
+            padding: 8px;
+            background: #f5f5f5;
+            border-radius: 5px;
+            font-family: monospace;
+        }}
+        
+        .inverter-card .inv-stat {{
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 0;
+            border-bottom: 1px solid #eee;
+        }}
+        
+        .inverter-card .inv-stat:last-child {{
+            border-bottom: none;
+        }}
+        
+        .inverter-card .inv-stat-label {{
+            color: #666;
+        }}
+        
+        .inverter-card .inv-stat-value {{
+            font-weight: bold;
+            color: #333;
+        }}
+        
+        .temp-warning {{
+            color: #ff9800;
+            font-weight: bold;
+        }}
+        
+        .temp-critical {{
+            color: #dc3545;
+            font-weight: bold;
+        }}
+        
+        .alert-history {{
+            margin: 20px 0;
+        }}
+        
+        .alert-item {{
+            display: grid;
+            grid-template-columns: 160px 150px 1fr;
+            gap: 15px;
+            align-items: center;
+            padding: 15px;
+            border-bottom: 1px solid #eee;
+            transition: background 0.2s;
+        }}
+        
+        .alert-item:hover {{
+            background: #f8f9fa;
+        }}
+        
+        .alert-item:last-child {{
+            border-bottom: none;
+        }}
+        
+        .alert-time {{
+            color: #666;
+            font-size: 0.9em;
+            font-family: monospace;
+        }}
+        
+        .alert-badge {{
+            display: inline-block;
+            padding: 6px 12px;
+            border-radius: 20px;
+            color: white;
+            font-size: 0.85em;
+            font-weight: 500;
+            text-align: center;
+        }}
+        
+        .alert-subject {{
+            color: #333;
+            font-size: 0.95em;
+        }}
+        
+        .chart-container {{
+            margin: 30px 0;
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+        }}
+        
+        canvas {{
+            max-height: 400px;
+        }}
+        
+        .footer {{
+            text-align: center;
+            color: white;
+            margin-top: 30px;
+            font-size: 0.9em;
+            text-shadow: 1px 1px 3px rgba(0,0,0,0.5);
+        }}
+        
+        .retry-btn {{
+            background: #667eea;
+            color: white;
+            border: none;
+            padding: 8px 15px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 0.9em;
+            margin-top: 10px;
+            transition: background 0.2s;
+        }}
+        
+        .retry-btn:hover {{
+            background: #5a6fd6;
+        }}
+        
+        @media (max-width: 768px) {{
+            .alert-item {{
+                grid-template-columns: 1fr;
+                gap: 8px;
+            }}
+            
+            .alert-badge {{
+                width: fit-content;
+            }}
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>TULIA HOUSE</h1>
+            <div class="subtitle">☀️ Solar Energy Monitoring System</div>
+            <div class="specs">📍 Champagne Ridge, Kajiado | 🔆 10kW Solar Array | 🔋 Cascade Battery System</div>
+        </div>
+        
+        <div class="card">
+            <div class="timestamp">
+                <strong>Last Updated:</strong> {latest_data.get('timestamp', 'N/A')}
+            </div>
+            
+            <div class="system-status {'critical' if generator_running or backup_voltage < 51.2 else 'warning' if backup_active else 'normal'}">
+                <h2>{'🚨 GENERATOR RUNNING' if generator_running else '🚨 GENERATOR STARTING' if backup_voltage < 51.2 else '⚠️ BACKUP SYSTEM ACTIVE' if backup_active else '✓ NORMAL OPERATION'}</h2>
+                <div class="status-text">
+                    {
+                        'Generator is running. Backup battery critical.' if generator_running else
+                        'Backup voltage critical. Generator should be starting.' if backup_voltage < 51.2 else
+                        f'Backup inverter supplying {latest_data.get("inverters", [{}])[2].get("OutputPower", 0) if len(latest_data.get("inverters", [])) > 2 else 0:.0f}W to system.' if backup_active else
+                        'All systems operating on primary batteries.'
+                    }
+                </div>
+            </div>
+"""
+    
+    # Weather alert - ALWAYS SHOW with debug info
+    if solar_conditions:
+        alert_class = "poor" if solar_conditions['poor_conditions'] else "good"
+        period = solar_conditions.get('analysis_period', 'Next 10 Hours')
+        is_night = solar_conditions.get('is_nighttime', False)
+        
+        html += f"""
+            <div class="weather-alert {alert_class}">
+                <h3>{'☁️ Poor Solar Conditions Ahead' if solar_conditions['poor_conditions'] else '☀️ Good Solar Conditions Expected'}</h3>
+                <p><strong>{period}:</strong> Cloud Cover: {solar_conditions['avg_cloud_cover']:.0f}% | Solar Radiation: {solar_conditions['avg_solar_radiation']:.0f} W/m²</p>
+                {'<p>⚠️ Limited recharge expected. Monitor battery levels closely.</p>' if solar_conditions['poor_conditions'] else '<p>✓ Batteries should recharge well during daylight hours.</p>'}
+                {f'<p style="font-size: 0.9em; opacity: 0.8;">🌙 Currently nighttime - analyzing tomorrow\'s solar potential</p>' if is_night else ''}
+            </div>
+"""
+    else:
+        # Debug: Show why weather is not available
+        html += f"""
+            <div class="weather-alert error">
+                <h3>⚠️ Weather Data Unavailable</h3>
+                <p><strong>Status:</strong> {weather_debug['status']}</p>
+                <p><strong>Last Error:</strong> {weather_debug['error']}</p>
+                <p><strong>Last Attempt:</strong> {weather_debug['last_attempt']}</p>
+                <p><strong>URL Used:</strong> <span style="font-size:0.8em; font-family:monospace;">{weather_debug['url_used']}</span></p>
+                <button class="retry-btn" onclick="fetch('/refresh_weather').then(r => window.location.reload())">🔄 Force Retry Now</button>
+            </div>
+"""
+    
+    html += f"""
+            <div class="metrics-grid">
+                <div class="metric {primary_color}">
+                    <div class="metric-label">Primary Batteries</div>
+                    <div class="metric-value">{primary_battery:.0f}%</div>
+                    <div class="metric-subtext">Inverters 1 & 2 (Min)</div>
+                </div>
+                
+                <div class="metric {backup_voltage_color}">
+                    <div class="metric-label">Backup Battery</div>
+                    <div class="metric-value">{backup_voltage:.1f}V</div>
+                    <div class="metric-subtext">{backup_voltage_status} | Gen at 51.2V</div>
+                </div>
+                
+                <div class="metric blue">
+                    <div class="metric-label">Total Load</div>
+                    <div class="metric-value">{total_load:.0f}W</div>
+                    <div class="metric-subtext">All Inverters</div>
+                </div>
+                
+                <div class="metric gray">
+                    <div class="metric-label">Solar Input</div>
+                    <div class="metric-value">{total_solar:.0f}W</div>
+                    <div class="metric-subtext">Current Generation</div>
+                </div>
+                
+                <div class="metric {'red' if total_battery_discharge > 2000 else 'orange' if total_battery_discharge > 1000 else 'green'}">
+                    <div class="metric-label">Battery Discharge</div>
+                    <div class="metric-value">{total_battery_discharge:.0f}W</div>
+                    <div class="metric-subtext">From Battery</div>
+                </div>
