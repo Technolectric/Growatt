@@ -90,8 +90,8 @@ last_communication = {}  # Track last successful communication per inverter
 
 # Solar forecast globals
 solar_forecast = []  # List of tuples (time, forecasted_generation)
-solar_generation_pattern = deque(maxlen=24)  # Store solar generation for pattern recognition
-load_demand_pattern = deque(maxlen=24)  # Store load demand for pattern recognition
+solar_generation_pattern = deque(maxlen=48)  # Store solar generation for pattern recognition (48 hours)
+load_demand_pattern = deque(maxlen=48)  # Store load demand for pattern recognition
 SOLAR_EFFICIENCY_FACTOR = 0.8  # Fixed efficiency factor for solar panels (accounts for dust, temperature, etc.)
 FORECAST_HOURS = 12  # Number of hours to forecast
 
@@ -125,7 +125,6 @@ def get_weather_from_weatherapi():
         # Get the key from env
         WEATHERAPI_KEY = os.getenv("WEATHERAPI_KEY") 
         
-        # FIXED: This line was shifted to the left, causing the SyntaxError
         url = f"http://api.weatherapi.com/v1/forecast.json?key={WEATHERAPI_KEY}&q={LATITUDE},{LONGITUDE}&days=2"
         
         response = requests.get(url, timeout=10)
@@ -425,53 +424,27 @@ def get_hourly_weather_forecast(weather_data, num_hours=12):
     return hourly_forecast
 
 def apply_solar_curve(generation, hour_of_day):
-    """Apply solar curve - solar generation follows a bell curve throughout the day"""
-    # Solar generation curve (based on typical solar radiation pattern)
-    # 0 at night, peaks at solar noon (~12:00-13:00)
+    """Apply solar curve - STRICTLY 0 at night, bell curve during day"""
+    # Kajiado, Kenya (Equatorial) - Civil Twilight ~06:00 to ~19:00
+    if hour_of_day < 6 or hour_of_day >= 19:
+        return 0.0
     
-    if hour_of_day < 6 or hour_of_day >= 18:
-        # Night time - minimal generation
-        return generation * 0.05  # 5% of max (just residual)
+    # Convert hour to position in solar day (0.0 at 6:00, 1.0 at 19:00)
+    solar_day_length = 13.0
+    solar_hour = (hour_of_day - 6) / solar_day_length
     
-    # Convert hour to position in solar day (0 at 6:00, 1 at 18:00)
-    solar_hour = (hour_of_day - 6) / 12.0
+    # Apply bell curve (sin^2 function provides a more natural solar ramp than cosine)
+    curve_factor = np.sin(solar_hour * np.pi) ** 2
     
-    # Apply bell curve (cosine function for smooth curve)
-    # Peak at solar noon (solar_hour = 0.5)
-    curve_factor = np.cos((solar_hour - 0.5) * np.pi * 2) * -0.5 + 0.5
-    
-    # Adjust curve - faster ramp up in morning, slower decline in afternoon
-    if solar_hour < 0.5:  # Morning
-        curve_factor = curve_factor ** 0.8
-    else:  # Afternoon
-        curve_factor = curve_factor ** 1.2
-    
-    # At 6:00 and 18:00, should be near 0
-    if hour_of_day == 6 or hour_of_day == 18:
-        curve_factor = 0.1
-    
-    # At 7:00 and 17:00, should be around 0.3
-    elif hour_of_day == 7 or hour_of_day == 17:
-        curve_factor = 0.3
-    
-    # At 8:00 and 16:00, should be around 0.6
-    elif hour_of_day == 8 or hour_of_day == 16:
-        curve_factor = 0.6
-    
-    # At 9:00 and 15:00, should be around 0.8
-    elif hour_of_day == 9 or hour_of_day == 15:
-        curve_factor = 0.8
-    
-    # At 10:00-14:00, should be near peak
-    elif 10 <= hour_of_day <= 14:
-        curve_factor = 0.9 + 0.1 * np.sin((hour_of_day - 12) * np.pi / 4)
+    # Adjust for atmospheric mass (morning/evening is weaker)
+    if hour_of_day <= 7 or hour_of_day >= 18:
+        curve_factor *= 0.7
     
     return generation * curve_factor
 
 def generate_solar_forecast(weather_forecast_data, historical_pattern):
-    """Generate solar generation forecast based on hourly weather data and solar curve"""
+    """Generate solar generation forecast with strict night-time zeroing"""
     forecast = []
-    now = datetime.now(EAT)
     
     if not weather_forecast_data:
         return forecast
@@ -488,37 +461,45 @@ def generate_solar_forecast(weather_forecast_data, historical_pattern):
     for hour_data in hourly_weather:
         forecast_time = hour_data['time']
         hour_of_day = hour_data['hour']
-        cloud_cover = hour_data['cloud_cover']
-        solar_radiation = hour_data['solar_radiation']
         
-        # Calculate cloud factor (0-1, where 1 is clear sky)
-        cloud_factor = max(0, 1 - (cloud_cover / 100))
-        
-        # Adjust radiation by cloud factor
-        adjusted_radiation = solar_radiation * cloud_factor
-        
-        # Base generation estimate from weather (theoretical maximum at this radiation level)
-        theoretical_generation = (adjusted_radiation / 1000) * max_possible_generation * SOLAR_EFFICIENCY_FACTOR
-        
-        # Apply solar curve (bell curve throughout the day)
-        curve_adjusted_generation = apply_solar_curve(theoretical_generation, hour_of_day)
-        
-        # If we have historical pattern, blend it
-        if historical_pattern:
-            # Find historical pattern for this hour
-            pattern_factor = 0.5  # Default if no pattern
-            for pattern_hour, normalized in historical_pattern:
-                if pattern_hour == hour_of_day:
-                    pattern_factor = normalized
-                    break
-            
-            # Blend weather-based and historical pattern (50/50)
-            blended_generation = (
-                curve_adjusted_generation * 0.5 + 
-                (pattern_factor * max_possible_generation) * 0.5
-            )
+        # --- FIXED LOGIC: Hard Night Cutoff ---
+        # If it is night, force 0 regardless of weather API (which might give residual values)
+        if hour_of_day < 6 or hour_of_day >= 19:
+            blended_generation = 0.0
+            theoretical_generation = 0.0
+            cloud_factor = 0.0
+            cloud_cover = 100
+            solar_radiation = 0
         else:
-            blended_generation = curve_adjusted_generation
+            # Daytime logic
+            cloud_cover = hour_data['cloud_cover']
+            solar_radiation = hour_data['solar_radiation']
+            
+            # Calculate cloud factor (0-1, where 1 is clear sky) - Weighted non-linear
+            cloud_factor = max(0.1, (1 - (cloud_cover / 100)) ** 1.5)
+            
+            # Base generation estimate from weather (theoretical maximum at this radiation level)
+            theoretical_generation = (solar_radiation / 1000) * max_possible_generation * SOLAR_EFFICIENCY_FACTOR
+            
+            # Apply solar curve (bell curve throughout the day)
+            curve_adjusted_generation = apply_solar_curve(theoretical_generation, hour_of_day)
+            
+            # If we have historical pattern, blend it
+            if historical_pattern:
+                # Find historical pattern for this hour
+                pattern_factor = 0.0
+                for pattern_hour, normalized in historical_pattern:
+                    if pattern_hour == hour_of_day:
+                        pattern_factor = normalized
+                        break
+                
+                # Blend weather-based and historical pattern (60/40 split)
+                blended_generation = (
+                    curve_adjusted_generation * 0.6 + 
+                    (pattern_factor * max_possible_generation) * 0.4
+                )
+            else:
+                blended_generation = curve_adjusted_generation
         
         forecast.append({
             'time': forecast_time,
@@ -648,20 +629,29 @@ def calculate_battery_life(solar_forecast_data, load_forecast_data, current_prim
     }
 
 def update_solar_pattern(current_generation):
-    """Update historical solar pattern with current data"""
+    """Update historical solar pattern with current data - FIX: Ignore night noise"""
     now = datetime.now(EAT)
     hour = now.hour
+    
+    # --- FIXED LOGIC: Clean Data Recording ---
+    # Inverters often report 10-25W at night (standby consumption or sensor drift).
+    # We must explicitly record 0.0 for night hours to prevent the learning algorithm
+    # from thinking there is solar power at 10 PM.
+    if hour < 6 or hour >= 19:
+        clean_generation = 0.0
+    else:
+        clean_generation = current_generation
     
     # Calculate current generation percentage of capacity
     current_capacity_pct = 0
     if TOTAL_SOLAR_CAPACITY_KW * 1000 > 0:
-        current_capacity_pct = min(current_generation / (TOTAL_SOLAR_CAPACITY_KW * 1000), 1.0)
+        current_capacity_pct = min(clean_generation / (TOTAL_SOLAR_CAPACITY_KW * 1000), 1.0)
     
     # Update pattern
     solar_generation_pattern.append({
         'timestamp': now,
         'hour': hour,
-        'generation': current_generation,
+        'generation': clean_generation,
         'capacity_pct': current_capacity_pct,
         'max_possible': TOTAL_SOLAR_CAPACITY_KW * 1000
     })
@@ -1147,7 +1137,7 @@ def poll_growatt():
             # Sort inverters by display order
             inverter_data.sort(key=lambda x: x.get('DisplayOrder', 99))
             
-            # Update solar and load patterns
+            # Update solar and load patterns (Using the new CLEAN update function)
             update_solar_pattern(total_solar_input_W)
             update_load_pattern(total_output_power)
             
