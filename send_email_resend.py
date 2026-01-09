@@ -60,6 +60,7 @@ latest_data = {}
 load_history = []
 battery_history = []
 weather_forecast = {}
+alert_history = []  # Track all alerts sent in last 12 hours: (timestamp, type, subject)
 
 # East African Timezone
 EAT = timezone(timedelta(hours=3))
@@ -155,7 +156,7 @@ def analyze_solar_conditions(forecast):
 # Email function with alert type tracking
 # ----------------------------
 def send_email(subject, html_content, alert_type="general"):
-    global last_alert_time
+    global last_alert_time, alert_history
     if not all([RESEND_API_KEY, SENDER_EMAIL, RECIPIENT_EMAIL]):
         print("✗ Error: Missing email credentials in env")
         return False
@@ -197,8 +198,21 @@ def send_email(subject, html_content, alert_type="general"):
             json=email_data
         )
         if response.status_code == 200:
+            now = datetime.now(EAT)
             print(f"✓ Email sent: {subject}")
-            last_alert_time[alert_type] = datetime.now(EAT)
+            last_alert_time[alert_type] = now
+            
+            # Add to alert history
+            alert_history.append({
+                "timestamp": now,
+                "type": alert_type,
+                "subject": subject
+            })
+            
+            # Keep only last 12 hours of alerts
+            cutoff = now - timedelta(hours=12)
+            alert_history[:] = [a for a in alert_history if a['timestamp'] >= cutoff]
+            
             return True
         else:
             print(f"✗ Email failed {response.status_code}: {response.text}")
@@ -799,6 +813,60 @@ def home():
             color: #333;
         }}
         
+        .alert-history {{
+            margin: 20px 0;
+        }}
+        
+        .alert-item {{
+            display: grid;
+            grid-template-columns: 160px 150px 1fr;
+            gap: 15px;
+            align-items: center;
+            padding: 15px;
+            border-bottom: 1px solid #eee;
+            transition: background 0.2s;
+        }}
+        
+        .alert-item:hover {{
+            background: #f8f9fa;
+        }}
+        
+        .alert-item:last-child {{
+            border-bottom: none;
+        }}
+        
+        .alert-time {{
+            color: #666;
+            font-size: 0.9em;
+            font-family: monospace;
+        }}
+        
+        .alert-badge {{
+            display: inline-block;
+            padding: 6px 12px;
+            border-radius: 20px;
+            color: white;
+            font-size: 0.85em;
+            font-weight: 500;
+            text-align: center;
+        }}
+        
+        .alert-subject {{
+            color: #333;
+            font-size: 0.95em;
+        }}
+        
+        @media (max-width: 768px) {{
+            .alert-item {{
+                grid-template-columns: 1fr;
+                gap: 8px;
+            }}
+            
+            .alert-badge {{
+                width: fit-content;
+            }}
+        }}
+        
         .chart-container {{ 
             margin: 30px 0;
             background: white;
@@ -947,7 +1015,61 @@ def home():
         </div>
         
         <meta http-equiv="refresh" content="300">
+"""
+    
+    # Alert History Section
+    if alert_history:
+        html += """
+        <div class="card">
+            <h2>📧 Alert History - Last 12 Hours</h2>
+            <div class="alert-history">
+"""
         
+        # Get alert type styling
+        def get_alert_badge(alert_type):
+            badges = {
+                "critical": ("🔴", "Critical", "#dc3545"),
+                "very_high_load": ("🔴", "Very High Load", "#dc3545"),
+                "backup_active": ("🟠", "Backup Active", "#ff9800"),
+                "high_load": ("🟠", "High Load", "#ff9800"),
+                "warning": ("🟡", "Warning", "#ffc107"),
+                "moderate_load": ("🔵", "Moderate Load", "#2196F3"),
+                "test": ("⚪", "Test", "#9e9e9e"),
+                "general": ("⚪", "Info", "#9e9e9e")
+            }
+            return badges.get(alert_type, ("⚪", "Unknown", "#9e9e9e"))
+        
+        # Display alerts newest first
+        for alert in reversed(alert_history):
+            icon, badge_text, color = get_alert_badge(alert['type'])
+            time_str = alert['timestamp'].strftime("%H:%M:%S")
+            date_str = alert['timestamp'].strftime("%Y-%m-%d")
+            
+            html += f"""
+                <div class="alert-item">
+                    <div class="alert-time">{date_str} {time_str}</div>
+                    <div class="alert-badge" style="background: {color};">{icon} {badge_text}</div>
+                    <div class="alert-subject">{alert['subject']}</div>
+                </div>
+"""
+        
+        html += """
+            </div>
+        </div>
+"""
+    else:
+        html += """
+        <div class="card">
+            <h2>📧 Alert History - Last 12 Hours</h2>
+            <div class="alert-history">
+                <p style="text-align: center; color: #666; padding: 20px;">
+                    ✓ No alerts sent in the last 12 hours
+                </p>
+            </div>
+        </div>
+"""
+    
+    html += """
         <div class="card">
             <div class="chart-container">
                 <h2>Power Monitoring - Last 12 Hours</h2>
