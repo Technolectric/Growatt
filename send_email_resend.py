@@ -934,24 +934,29 @@ def home():
         forecast_times = [sf['time'].strftime('%H:%M') for sf in solar_forecast_data]
     
     sim_times, trace_primary, trace_backup, trace_genset, trace_deficit = [], [], [], [], []
-    pred_class, pred_message = "good", "Initializing..."
+    pred_class, pred_message = "good", "Initializing prediction..."
+    show_cascade = False
     
     if battery_life_prediction:
-        sim_times = ["Now"] + forecast_times
         trace_primary = battery_life_prediction.get('primary_trace', [])
         trace_backup = battery_life_prediction.get('backup_trace', [])
         trace_genset = battery_life_prediction.get('genset_trace', [])
         trace_deficit = battery_life_prediction.get('deficit_trace', [])
         
-        if battery_life_prediction.get('will_need_generator'):
-            pred_class = "critical"
-            pred_message = "🚨 CRITICAL: Generator will be needed!"
-        elif trace_primary and min(trace_primary) <= 0:
-            pred_class = "warning"
-            pred_message = "⚠️ WARNING: Primary battery will deplete."
-        else:
-            pred_class = "good"
-            pred_message = "✓ OK: Battery sufficient for forecast period."
+        # Only show if we have valid data
+        if trace_primary and len(trace_primary) > 0:
+            show_cascade = True
+            sim_times = ["Now"] + forecast_times
+            
+            if battery_life_prediction.get('will_need_generator'):
+                pred_class = "critical"
+                pred_message = "🚨 CRITICAL: Generator will be needed!"
+            elif trace_primary and min(trace_primary) <= 0:
+                pred_class = "warning"
+                pred_message = "⚠️ WARNING: Primary battery will deplete."
+            else:
+                pred_class = "good"
+                pred_message = "✓ OK: Battery sufficient for forecast period."
     
     # Convert to JSON for JavaScript
     sim_times_json = json.dumps(sim_times)
@@ -1030,9 +1035,13 @@ def home():
 <body>
     <div class="container">
         <div class="header">
+            <img src="https://www.technolectric.com/wp-content/uploads/2024/01/technolectric-logo.png" 
+                 alt="Technolectric" 
+                 style="max-width: 200px; margin-bottom: 20px; filter: brightness(0) invert(1);"
+                 onerror="this.style.display='none'">
             <h1>TULIA HOUSE</h1>
             <div class="subtitle">☀️ Solar Energy Monitoring System with AI Forecasting</div>
-            <div class="specs">📍 Champagne Ridge, Kajiado | 🔆 10kW Solar | 🔋 30kWh Primary + 21kWh Backup (5yo)</div>
+            <div class="specs">📍 Champagne Ridge, Kajiado | 🔆 10kW Solar | 🔋 30kWh Primary + 15kWh Backup (5yo)</div>
         </div>
         
         <div class="card">
@@ -1078,7 +1087,7 @@ def home():
                 <h3>🔋 Battery Life Prediction (Next {FORECAST_HOURS} Hours)</h3>
                 <p><strong>{pred_message}</strong></p>
                 <p><strong>Primary:</strong> {primary_battery:.0f}% = {(primary_battery/100)*18:.1f}kWh of 18kWh usable</p>
-                <p><strong>Backup:</strong> {BACKUP_BATTERY_USABLE_WH/1000:.0f}kWh available (5yo LiFePO4)</p>
+                <p><strong>Backup:</strong> ~15kWh available (5yo LiFePO4, degraded)</p>
                 <p style="font-size:0.85em;opacity:0.8">Based on {historical_pattern_count} solar + {load_pattern_count} load patterns</p>
             </div>
             
@@ -1091,7 +1100,7 @@ def home():
                 <div class="metric {backup_voltage_color}">
                     <div class="metric-label">Backup Battery</div>
                     <div class="metric-value">{backup_voltage:.1f}V</div>
-                    <div class="metric-subtext">{backup_voltage_status} | 14.7kWh capacity</div>
+                    <div class="metric-subtext">{backup_voltage_status} | ~15kWh capacity</div>
                 </div>
                 <div class="metric blue">
                     <div class="metric-label">Total Load</div>
@@ -1186,8 +1195,8 @@ def home():
         </div>
 """
     
-    # Cascade chart
-    if sim_times and trace_primary:
+    # Cascade chart - only show if we have data
+    if show_cascade and sim_times and trace_primary:
         html += f"""
         <div class="card">
             <div class="chart-container">
@@ -1228,11 +1237,21 @@ def home():
         </div>
 """
     else:
-        html += """
+        html += f"""
         <div class="card">
             <div class="chart-container">
-                <h2>🔋 Battery Cascade Prediction</h2>
-                <p style="padding:20px;text-align:center;color:#666">Collecting data for prediction... Please wait a few minutes.</p>
+                <h2>🔋 Battery Cascade Prediction - Next {FORECAST_HOURS} Hours</h2>
+                <div style="padding: 40px; text-align: center; color: #666;">
+                    <p style="font-size: 1.2em; margin-bottom: 15px;">⏳ Building AI Prediction Model...</p>
+                    <p style="font-size: 0.95em;">The system is learning your solar generation and load patterns.</p>
+                    <p style="font-size: 0.95em; margin-top: 10px;">This takes 2-3 polling cycles (10-15 minutes) after startup.</p>
+                    <p style="font-size: 0.9em; margin-top: 15px; opacity: 0.8;">
+                        <strong>Patterns collected:</strong> {historical_pattern_count} solar samples, {load_pattern_count} load samples
+                    </p>
+                    <p style="font-size: 0.85em; margin-top: 5px; opacity: 0.7;">
+                        (Need at least 3 samples to start predictions)
+                    </p>
+                </div>
             </div>
         </div>
 """
@@ -1266,7 +1285,7 @@ def home():
         </div>
         
         <div class="footer">
-            10kW Solar • 30kWh Primary (18kWh usable) • 21kWh Backup (5yo) • LiFePO4 • AI Forecasting • Managed by YourHost
+            10kW Solar • 30kWh Primary (18kWh usable) • 15kWh Backup (5yo) • LiFePO4 • AI Forecasting • Technolectric Ltd.
         </div>
     </div>
 </body>
