@@ -74,6 +74,7 @@ latest_data = {}
 load_history = []
 battery_history = []
 weather_forecast = {}
+weather_source = "Initializing..."  # Track which weather service is working
 alert_history = []
 last_communication = {}  # Track last successful communication per inverter
 
@@ -81,28 +82,124 @@ last_communication = {}  # Track last successful communication per inverter
 EAT = timezone(timedelta(hours=3))
 
 # ----------------------------
-# Weather & Solar Forecast Functions
+# Multi-Source Weather Forecast Functions
 # ----------------------------
-def get_weather_forecast():
-    """Get weather forecast from Open-Meteo (free, no API key)"""
+def get_weather_from_openmeteo():
+    """Try Open-Meteo API (Primary source)"""
     try:
-        url = f"https://api.open-meteo.com/v1/forecast?latitude={LATITUDE}&longitude={LONGITUDE}&hourly=cloud_cover,shortwave_radiation,direct_radiation&timezone=Africa/Nairobi&forecast_days=2"
+        url = f"https://api.open-meteo.com/v1/forecast?latitude={LATITUDE}&longitude={LONGITUDE}&hourly=cloud_cover,shortwave_radiation&timezone=Africa/Nairobi&forecast_days=2"
         response = requests.get(url, timeout=10)
         response.raise_for_status()
         data = response.json()
         
-        forecast = {
+        return {
             'times': data['hourly']['time'],
             'cloud_cover': data['hourly']['cloud_cover'],
             'solar_radiation': data['hourly']['shortwave_radiation'],
-            'direct_radiation': data['hourly']['direct_radiation']
+            'source': 'Open-Meteo'
         }
-        
-        print(f"✓ Weather forecast updated: {len(forecast['times'])} hours")
-        return forecast
     except Exception as e:
-        print(f"✗ Error fetching weather forecast: {e}")
+        print(f"✗ Open-Meteo failed: {e}")
         return None
+
+def get_weather_from_weatherapi():
+    """Try WeatherAPI.com (Fallback 1 - uses demo key)"""
+    try:
+        # Using lat,lon format which works without API key for basic forecast
+        url = f"http://api.weatherapi.com/v1/forecast.json?key=demo&q={LATITUDE},{LONGITUDE}&days=2"
+        response = requests.get(url, timeout=10)
+        
+        if response.status_code == 200:
+            data = response.json()
+            
+            times = []
+            cloud_cover = []
+            solar_radiation = []
+            
+            for day in data.get('forecast', {}).get('forecastday', []):
+                for hour in day.get('hour', []):
+                    times.append(hour['time'])
+                    cloud_cover.append(hour['cloud'])
+                    # Estimate solar from UV index
+                    uv = hour.get('uv', 0)
+                    solar_radiation.append(uv * 100)
+            
+            if times:
+                return {
+                    'times': times,
+                    'cloud_cover': cloud_cover,
+                    'solar_radiation': solar_radiation,
+                    'source': 'WeatherAPI'
+                }
+        return None
+    except Exception as e:
+        print(f"✗ WeatherAPI failed: {e}")
+        return None
+
+def get_weather_from_7timer():
+    """Try 7Timer.info (Fallback 2 - always free, no key)"""
+    try:
+        url = f"http://www.7timer.info/bin/api.pl?lon={LONGITUDE}&lat={LATITUDE}&product=civil&output=json"
+        response = requests.get(url, timeout=15)
+        response.raise_for_status()
+        data = response.json()
+        
+        times = []
+        cloud_cover = []
+        solar_radiation = []
+        
+        base_time = datetime.now(EAT)
+        
+        for item in data.get('dataseries', [])[:48]:
+            hour_offset = item.get('timepoint', 0)
+            forecast_time = base_time + timedelta(hours=hour_offset)
+            times.append(forecast_time.strftime('%Y-%m-%dT%H:%M'))
+            
+            # Cloud cover: 1-9 scale
+            cloud_val = item.get('cloudcover', 5)
+            cloud_pct = min((cloud_val * 12), 100)
+            cloud_cover.append(cloud_pct)
+            
+            # Estimate solar
+            solar_est = max(800 * (1 - cloud_pct/100), 0)
+            solar_radiation.append(solar_est)
+        
+        if times:
+            return {
+                'times': times,
+                'cloud_cover': cloud_cover,
+                'solar_radiation': solar_radiation,
+                'source': '7Timer'
+            }
+        return None
+    except Exception as e:
+        print(f"✗ 7Timer failed: {e}")
+        return None
+
+def get_weather_forecast():
+    """Try multiple weather sources with fallback"""
+    global weather_source
+    
+    print("🌤️ Fetching weather forecast...")
+    
+    # Try sources in order
+    sources = [
+        ("Open-Meteo", get_weather_from_openmeteo),
+        ("WeatherAPI", get_weather_from_weatherapi),
+        ("7Timer", get_weather_from_7timer)
+    ]
+    
+    for source_name, fetch_func in sources:
+        print(f"   Trying {source_name}...")
+        forecast = fetch_func()
+        if forecast and len(forecast.get('times', [])) > 0:
+            weather_source = forecast['source']
+            print(f"✓ Weather forecast from {weather_source}: {len(forecast['times'])} hours")
+            return forecast
+    
+    print("✗ All weather sources failed")
+    weather_source = "All sources failed"
+    return None
 
 def analyze_solar_conditions(forecast):
     """Analyze upcoming solar conditions - smart daytime-only analysis"""
@@ -1064,7 +1161,7 @@ def home():
             </div>
 """
     
-    # Weather alert - ALWAYS SHOW with debug info
+    # Weather alert - ALWAYS SHOW
     if solar_conditions:
         alert_class = "poor" if solar_conditions['poor_conditions'] else "good"
         period = solar_conditions.get('analysis_period', 'Next 10 Hours')
@@ -1076,17 +1173,17 @@ def home():
                 <p><strong>{period}:</strong> Cloud Cover: {solar_conditions['avg_cloud_cover']:.0f}% | Solar Radiation: {solar_conditions['avg_solar_radiation']:.0f} W/m²</p>
                 {'<p>⚠️ Limited recharge expected. Monitor battery levels closely.</p>' if solar_conditions['poor_conditions'] else '<p>✓ Batteries should recharge well during daylight hours.</p>'}
                 {f'<p style="font-size: 0.9em; opacity: 0.8;">🌙 Currently nighttime - analyzing tomorrow\'s solar potential</p>' if is_night else ''}
+                <p style="font-size: 0.8em; opacity: 0.7; margin-top: 10px;">📡 Data from: {weather_source}</p>
             </div>
 """
     else:
-        # Debug: Show why weather is not available
-        weather_debug = "Weather API not responding" if not weather_forecast else "Could not analyze solar conditions"
+        # Show status when weather unavailable
         html += f"""
-            <div class="weather-alert good">
+            <div class="weather-alert poor">
                 <h3>🌤️ Weather Forecast</h3>
-                <p><strong>Status:</strong> {weather_debug}</p>
-                <p>Trying to fetch weather data... Updates every 30 minutes from Open-Meteo.</p>
-                <p style="font-size: 0.85em; opacity: 0.7;">Debug: forecast={'available' if weather_forecast else 'empty'}, conditions={'analyzed' if solar_conditions else 'null'}</p>
+                <p><strong>Status:</strong> {weather_source}</p>
+                <p>Unable to fetch weather data at this time. Trying multiple sources (Open-Meteo, WeatherAPI, 7Timer).</p>
+                <p style="font-size: 0.85em; opacity: 0.7;">Updates attempted every 30 minutes. System will keep trying.</p>
             </div>
 """
     
