@@ -204,6 +204,7 @@ def get_weather_forecast():
 def analyze_solar_conditions(forecast):
     """Analyze upcoming solar conditions - smart daytime-only analysis"""
     if not forecast:
+        print("⚠️ analyze_solar_conditions: No forecast data")
         return None
     
     try:
@@ -227,20 +228,38 @@ def analyze_solar_conditions(forecast):
         count = 0
         
         for i, time_str in enumerate(forecast['times']):
-            forecast_time = datetime.fromisoformat(time_str.replace('Z', '+00:00')).astimezone(EAT)
-            
-            if start_time <= forecast_time <= end_time:
-                hour = forecast_time.hour
-                if 6 <= hour <= 18:
-                    avg_cloud_cover += forecast['cloud_cover'][i]
-                    avg_solar_radiation += forecast['solar_radiation'][i]
-                    count += 1
+            try:
+                # Handle multiple time formats from different weather sources
+                if 'T' in time_str:
+                    # ISO format: 2026-01-09T21:00 or 2026-01-09T21:00:00Z
+                    forecast_time = datetime.fromisoformat(time_str.replace('Z', ''))
+                else:
+                    # Other formats
+                    forecast_time = datetime.strptime(time_str, '%Y-%m-%d %H:%M')
+                
+                # Ensure timezone aware
+                if forecast_time.tzinfo is None:
+                    forecast_time = forecast_time.replace(tzinfo=EAT)
+                else:
+                    forecast_time = forecast_time.astimezone(EAT)
+                
+                if start_time <= forecast_time <= end_time:
+                    hour = forecast_time.hour
+                    if 6 <= hour <= 18:
+                        avg_cloud_cover += forecast['cloud_cover'][i]
+                        avg_solar_radiation += forecast['solar_radiation'][i]
+                        count += 1
+            except Exception as parse_error:
+                # Skip this time entry if parsing fails
+                continue
         
         if count > 0:
             avg_cloud_cover /= count
             avg_solar_radiation /= count
             
             poor_conditions = avg_cloud_cover > 70 or avg_solar_radiation < 200
+            
+            print(f"✓ Solar analysis: {count} hours analyzed, Cloud: {avg_cloud_cover:.0f}%, Solar: {avg_solar_radiation:.0f}W/m²")
             
             return {
                 'avg_cloud_cover': avg_cloud_cover,
@@ -250,8 +269,12 @@ def analyze_solar_conditions(forecast):
                 'analysis_period': analysis_label,
                 'is_nighttime': is_nighttime
             }
+        else:
+            print(f"⚠️ Solar analysis: No valid hours found in forecast window")
     except Exception as e:
         print(f"✗ Error analyzing solar conditions: {e}")
+        import traceback
+        traceback.print_exc()
     
     return None
 
