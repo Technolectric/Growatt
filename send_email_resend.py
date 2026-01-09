@@ -388,4 +388,323 @@ def check_and_send_alerts(inverter_data, solar_conditions, total_solar_input, to
                     <p><strong>Inverter:</strong> {inv['Label']} ({inv['SN']})</p>
                     <p><strong>Temperature:</strong> {temp:.1f}°C (Threshold: {INVERTER_TEMP_WARNING}°C)</p>
                     <p>Inverter temperature is elevated. Ensure adequate ventilation.</p>
-                    <p>{'<strong style="color: #dc3545;">
+                    <p>{'<strong style="color: #dc3545;">⚠️ CRITICAL: Temperature above 70°C!</strong>' if temp >= INVERTER_TEMP_CRITICAL else ''}</p>
+                </div>
+                """,
+                alert_type="high_temperature"
+            )
+    
+    # ============================================
+    # CRITICAL: Generator Running
+    # ============================================
+    if generator_running or backup_voltage < BACKUP_VOLTAGE_THRESHOLD:
+        send_email(
+            subject="🚨 CRITICAL: Generator Running - Backup Battery Critical",
+            html_content=f"""
+            <div style="font-family: Arial; padding: 20px; background: #fff3cd; border-left: 5px solid #dc3545;">
+                <h2 style="color: #dc3545;">🚨 GENERATOR ACTIVATION</h2>
+                
+                <p><strong>Backup Inverter Status:</strong></p>
+                <ul>
+                    <li>Battery Voltage: <strong style="color: #dc3545;">{backup_voltage:.1f}V</strong></li>
+                    <li>Generator: <strong>{'RUNNING' if generator_running else 'Should be starting'}</strong></li>
+                    <li>Input Detected: {'Yes' if generator_running else 'No'}</li>
+                </ul>
+                
+                <p><strong>Primary Inverters:</strong></p>
+                <ul>
+                    <li>Inverter 1: {inv1['Capacity']:.0f}%</li>
+                    <li>Inverter 2: {inv2['Capacity']:.0f}%</li>
+                    <li>Total Load: {total_load:.0f}W</li>
+                </ul>
+                
+                <p><strong>⚠️ ACTION REQUIRED:</strong></p>
+                <ol>
+                    <li>Turn OFF all Ovens</li>
+                    <li>Turn OFF water heater (if used)</li>
+                    <li>Unplug non-essential devices</li>
+                    <li>Use only critical loads (lights, fridge)</li>
+                </ol>
+                
+                {f'<p style="color: #dc3545;"><strong>Weather:</strong> Poor solar ahead (Cloud: {solar_conditions["avg_cloud_cover"]:.0f}%). Generator may run extended period.</p>' if solar_conditions and solar_conditions['poor_conditions'] else ''}
+            </div>
+            """,
+            alert_type="critical"
+        )
+        return  # Don't check other alerts if generator is running
+    
+    # ============================================
+    # HIGH ALERT: Backup inverter active
+    # ============================================
+    if backup_active and primary_capacity < PRIMARY_BATTERY_THRESHOLD:
+        send_email(
+            subject="⚠️ HIGH ALERT: Backup Inverter Active",
+            html_content=f"""
+            <div style="font-family: Arial; padding: 20px; background: #fff3cd; border-left: 5px solid #ff9800;">
+                <h2 style="color: #ff9800;">⚠️ BACKUP SYSTEM ACTIVATED</h2>
+                
+                <p><strong>System Status:</strong></p>
+                <ul>
+                    <li>Backup Inverter: <strong>ACTIVE</strong> - Supplying {inv3_backup['OutputPower']:.0f}W</li>
+                    <li>Backup Voltage: {backup_voltage:.1f}V</li>
+                    <li>Primary Batteries: <strong>{primary_capacity:.0f}%</strong> (Below 40%)</li>
+                </ul>
+                
+                <p><strong>Action Required:</strong></p>
+                <ul>
+                    <li>Turn OFF Oven immediately</li>
+                    <li>Turn OFF water heater (if used) / Kettle</li>
+                    <li>Minimize all non-essential loads</li>
+                    <li>Use only lighting, fridge, essential devices</li>
+                </ul>
+                
+                {f'<p style="color: #dc3545;"><strong>Weather:</strong> Poor solar ahead (Cloud: {solar_conditions["avg_cloud_cover"]:.0f}%).</p>' if solar_conditions and solar_conditions['poor_conditions'] else ''}
+            </div>
+            """,
+            alert_type="backup_active"
+        )
+        return
+    
+    # ============================================
+    # WARNING: Primary batteries 40-50%
+    # ============================================
+    if 40 < primary_capacity < 50:
+        send_email(
+            subject="⚠️ WARNING: Primary Battery Low",
+            html_content=f"""
+            <div style="font-family: Arial; padding: 20px; background: #fff9e6; border-left: 5px solid #ffc107;">
+                <h2 style="color: #ffc107;">⚠️ PRIMARY BATTERY WARNING</h2>
+                
+                <p><strong>System Status:</strong></p>
+                <ul>
+                    <li>Primary Batteries: <strong>{primary_capacity:.0f}%</strong> (Approaching 40%)</li>
+                    <li>Inverter 1: {inv1['Capacity']:.0f}%</li>
+                    <li>Inverter 2: {inv2['Capacity']:.0f}%</li>
+                    <li>Backup Voltage: {backup_voltage:.1f}V</li>
+                </ul>
+                
+                <p><strong>Recommendation:</strong> Reduce high-power loads (Oven, water heater (if used), kettle).</p>
+                
+                {f'<p style="color: #dc3545;"><strong>Weather:</strong> Poor solar forecast. Consider reducing loads.</p>' if solar_conditions and solar_conditions['poor_conditions'] else ''}
+            </div>
+            """,
+            alert_type="warning"
+        )
+    
+    # ============================================
+    # SOLAR-AWARE BATTERY DISCHARGE ALERTS
+    # Only alert if power is coming from BATTERY, not solar
+    # ============================================
+    
+    # TIER 3: Very High Battery Discharge (>2500W)
+    if total_battery_discharge >= 2500:
+        send_email(
+            subject="🚨 URGENT: Very High Battery Discharge",
+            html_content=f"""
+            <div style="font-family: Arial; padding: 20px; background: #fff3cd; border-left: 5px solid #dc3545;">
+                <h2 style="color: #dc3545;">🚨 URGENT: HIGH BATTERY DISCHARGE</h2>
+                
+                <p><strong>Power Status:</strong></p>
+                <ul>
+                    <li>Battery Discharge: <strong style="color: #dc3545;">{total_battery_discharge:.0f}W</strong> (Critical!)</li>
+                    <li>Solar Input: {total_solar_input:.0f}W</li>
+                    <li>Total Load: {total_load:.0f}W</li>
+                    <li>Primary Batteries: {primary_capacity:.0f}%</li>
+                </ul>
+                
+                <p><strong>⚠️ IMMEDIATE ACTION:</strong></p>
+                <ul>
+                    <li>Turn OFF Oven immediately</li>
+                    <li>Turn OFF water heater (if used)</li>
+                    <li>Turn OFF kettle</li>
+                    <li>Reduce to essential loads only</li>
+                </ul>
+                
+                {f'<p style="color: #dc3545;"><strong>Weather:</strong> Poor solar conditions (Cloud: {solar_conditions["avg_cloud_cover"]:.0f}%). Battery recovery will be limited.</p>' if solar_conditions and solar_conditions['poor_conditions'] else ''}
+            </div>
+            """,
+            alert_type="very_high_load"
+        )
+    
+    # TIER 2: High Battery Discharge (1500-2500W)
+    elif 1500 <= total_battery_discharge < 2500:
+        send_email(
+            subject="⚠️ WARNING: High Battery Discharge",
+            html_content=f"""
+            <div style="font-family: Arial; padding: 20px; background: #fff9e6; border-left: 5px solid #ff9800;">
+                <h2 style="color: #ff9800;">⚠️ HIGH BATTERY DISCHARGE</h2>
+                
+                <p><strong>Power Status:</strong></p>
+                <ul>
+                    <li>Battery Discharge: <strong>{total_battery_discharge:.0f}W</strong></li>
+                    <li>Solar Input: {total_solar_input:.0f}W</li>
+                    <li>Total Load: {total_load:.0f}W</li>
+                    <li>Primary Batteries: {primary_capacity:.0f}%</li>
+                </ul>
+                
+                <p><strong>Recommendation:</strong> Reduce load to preserve battery.</p>
+                
+                {f'<p style="color: #dc3545;"><strong>Weather:</strong> Poor solar ahead. Consider reducing usage.</p>' if solar_conditions and solar_conditions['poor_conditions'] else ''}
+            </div>
+            """,
+            alert_type="high_load"
+        )
+    
+    # TIER 1: Moderate Battery Discharge (1000-1500W) with Low Battery
+    elif 1000 <= total_battery_discharge < 1500 and primary_capacity < 50:
+        send_email(
+            subject="ℹ️ INFO: Moderate Battery Discharge - Low Battery",
+            html_content=f"""
+            <div style="font-family: Arial; padding: 20px; background: #e7f3ff; border-left: 5px solid #2196F3;">
+                <h2 style="color: #2196F3;">ℹ️ MODERATE BATTERY DISCHARGE</h2>
+                
+                <p><strong>Power Status:</strong></p>
+                <ul>
+                    <li>Battery Discharge: {total_battery_discharge:.0f}W</li>
+                    <li>Solar Input: {total_solar_input:.0f}W</li>
+                    <li>Primary Batteries: <strong>{primary_capacity:.0f}%</strong> (Below 50%)</li>
+                </ul>
+                
+                <p><strong>Advisory:</strong> Consider conserving energy.</p>
+            </div>
+            """,
+            alert_type="moderate_load"
+        )
+
+# ----------------------------
+# Growatt Polling Loop
+# ----------------------------
+def poll_growatt():
+    global latest_data, load_history, battery_history, weather_forecast, last_communication
+    
+    # Fetch weather immediately on startup
+    print("🌤️ Fetching initial weather forecast...")
+    weather_forecast = get_weather_forecast()
+    last_weather_update = datetime.now(EAT) if weather_forecast else None
+    
+    while True:
+        try:
+            # Update weather logic:
+            # 1. If we have NO forecast, try every loop (5 mins)
+            # 2. If we have forecast, update every 30 mins
+            should_update_weather = False
+            
+            if weather_forecast is None:
+                should_update_weather = True
+            elif last_weather_update and (datetime.now(EAT) - last_weather_update > timedelta(minutes=30)):
+                should_update_weather = True
+                
+            if should_update_weather:
+                new_forecast = get_weather_forecast()
+                if new_forecast:
+                    weather_forecast = new_forecast
+                    last_weather_update = datetime.now(EAT)
+            
+            total_output_power = 0
+            total_battery_discharge_W = 0
+            total_solar_input_W = 0
+            inverter_data = []
+            now = datetime.now(EAT)
+            
+            primary_capacities = []
+            backup_data = None
+            generator_running = False
+            
+            for sn in SERIAL_NUMBERS:
+                try:
+                    response = requests.post(
+                        API_URL,
+                        data={"storage_sn": sn},
+                        headers=headers,
+                        timeout=20
+                    )
+                    response.raise_for_status()
+                    data = response.json().get("data", {})
+                    
+                    # Update last communication time
+                    last_communication[sn] = now
+                    
+                    # Get configuration
+                    config = INVERTER_CONFIG.get(sn, {"label": sn, "type": "unknown", "datalog": "N/A", "display_order": 99})
+                    
+                    # Extract metrics
+                    out_power = float(data.get("outPutPower") or 0)
+                    capacity = float(data.get("capacity") or 0)
+                    v_bat = float(data.get("vBat") or 0)
+                    p_bat = float(data.get("pBat") or 0)
+                    ppv = float(data.get("ppv") or 0)
+                    ppv2 = float(data.get("ppv2") or 0)
+                    
+                    # Temperature monitoring
+                    inv_temp = float(data.get("invTemperature") or 0)
+                    dcdc_temp = float(data.get("dcDcTemperature") or 0)
+                    temp = max(inv_temp, dcdc_temp, float(data.get("temperature") or 0))
+                    
+                    # Fault detection
+                    error_code = int(data.get("errorCode") or 0)
+                    fault_code = int(data.get("faultCode") or 0)
+                    warn_code = int(data.get("warnCode") or 0)
+                    has_fault = error_code != 0 or fault_code != 0 or warn_code != 0
+                    
+                    # AC input (for generator detection)
+                    vac = float(data.get("vac") or 0)
+                    pac_input = float(data.get("pAcInPut") or 0)
+                    
+                    total_output_power += out_power
+                    total_solar_input_W += (ppv + ppv2)
+                    
+                    if p_bat > 0:
+                        total_battery_discharge_W += p_bat
+                    
+                    inv_info = {
+                        "SN": sn,
+                        "Label": config['label'],
+                        "Type": config['type'],
+                        "DataLog": config['datalog'],
+                        "DisplayOrder": config['display_order'],
+                        "OutputPower": out_power,
+                        "Capacity": capacity,
+                        "vBat": v_bat,
+                        "pBat": p_bat,
+                        "ppv": ppv,
+                        "ppv2": ppv2,
+                        "temperature": temp,
+                        "invTemperature": inv_temp,
+                        "dcDcTemperature": dcdc_temp,
+                        "high_temperature": temp >= INVERTER_TEMP_WARNING,
+                        "Status": data.get("statusText", "Unknown"),
+                        "has_fault": has_fault,
+                        "fault_info": {
+                            "errorCode": error_code,
+                            "faultCode": fault_code,
+                            "warnCode": warn_code
+                        },
+                        "vac": vac,
+                        "pAcInput": pac_input,
+                        "communication_lost": False,
+                        "last_seen": now.strftime("%Y-%m-%d %H:%M:%S")
+                    }
+                    
+                    inverter_data.append(inv_info)
+                    
+                    # Track primary vs backup
+                    if config['type'] == 'primary':
+                        if capacity > 0:
+                            primary_capacities.append(capacity)
+                    elif config['type'] == 'backup':
+                        backup_data = inv_info
+                        # Check if generator is running
+                        if vac > 100 or pac_input > 50:
+                            generator_running = True
+                
+                except Exception as e:
+                    print(f"❌ Error polling {sn}: {e}")
+                    # Check for communication timeout
+                    if sn in last_communication:
+                        time_since_last = now - last_communication[sn]
+                        if time_since_last > timedelta(minutes=COMMUNICATION_TIMEOUT_MINUTES):
+                            # Add placeholder with communication lost flag
+                            config = INVERTER_CONFIG.get(sn, {})
+                            inverter_data.append({
+                                "SN": sn,
+                                "Label": config.get('label', sn),
