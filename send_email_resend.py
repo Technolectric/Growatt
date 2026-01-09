@@ -2,8 +2,9 @@ import os
 import time
 import requests
 from datetime import datetime, timedelta, timezone
-from threading import Thread
+from threading import Thread, Lock
 from flask import Flask, render_template_string, request
+from collections import deque
 
 # ----------------------------
 # Flask app
@@ -19,24 +20,61 @@ SERIAL_NUMBERS = os.getenv("SERIAL_NUMBERS", "").split(",")
 POLL_INTERVAL_MINUTES = int(os.getenv("POLL_INTERVAL_MINUTES", 5))
 
 # ----------------------------
-# Inverter Configuration
+# Inverter Configuration (Ordered)
 # ----------------------------
 INVERTER_CONFIG = {
-    "RKG3B0400T": {"label": "Inverter 1", "type": "primary", "datalog": "DDD0B021CC"},
-    "KAM4N5W0AG": {"label": "Inverter 2", "type": "primary", "datalog": "DDD0B02121"},
-    "JNK1CDR0KQ": {"label": "Inverter 3 (Backup)", "type": "backup", "datalog": "DDD0B0221H"}
+    "RKG3B0400T": {"label": "Inverter 1", "type": "primary", "datalog": "DDD0B021CC", "order": 1},
+    "KAM4N5W0AG": {"label": "Inverter 2", "type": "primary", "datalog": "DDD0B02121", "order": 2},
+    "JNK1CDR0KQ": {"label": "Inverter 3 (Backup)", "type": "backup", "datalog": "DDD0B0221H", "order": 3}
 }
 
 # Alert thresholds
 PRIMARY_BATTERY_THRESHOLD = 40  # When backup kicks in
 BACKUP_VOLTAGE_THRESHOLD = 51.2  # When generator starts
-BACKUP_CAPACITY_WARNING = 30  # Warn when backup battery is getting low
+BACKUP_VOLTAGE_WARNING = 52.3  # Warning threshold
+BACKUP_VOLTAGE_GOOD = 53.0  # Good threshold
+
+# Load alert thresholds - now consider battery discharge
+TIER3_LOAD_THRESHOLD = 5000  # >5000W with battery discharge >2000W
+TIER2_LOAD_THRESHOLD = 3000  # 3000-5000W with battery discharge >1000W
+TIER1_LOAD_THRESHOLD = 2000  # 2000-3000W with battery discharge >500W
+
 TOTAL_SOLAR_CAPACITY_KW = 10
 
-# Tiered Load Alert System
-# TIER 1: Moderate (1000-1500W) + Low Battery - 60 min cooldown - INFO
-# TIER 2: High (1500-2500W) - 30 min cooldown - WARNING
-# TIER 3: Very High (>2500W) - 15 min cooldown - URGENT
+# Inverter status codes from Growatt API
+INVERTER_STATUS_CODES = {
+    0: "Standby",
+    1: "Grid-connected",
+    2: "Battery Discharging",
+    3: "Fault",
+    4: "Flash update",
+    5: "PV charging",
+    6: "AC charging",
+    7: "Combined charging"
+}
+
+# Fault codes that indicate issues
+FAULT_CODES = {
+    0: "No fault",
+    1: "Grid voltage high",
+    2: "Grid voltage low",
+    3: "Grid frequency high",
+    4: "Grid frequency low",
+    5: "Grid loss",
+    6: "Islanding",
+    7: "Output overload",
+    8: "Temperature high",
+    9: "PV voltage high",
+    10: "AC voltage high",
+    11: "Battery voltage high",
+    12: "Battery voltage low",
+    13: "Battery over current",
+    14: "Ground fault",
+    15: "GFCI fault",
+    16: "Communication error",
+    17: "Hardware error",
+    18: "Battery temperature high"
+}
 
 # ----------------------------
 # Location Config (Kajiado, Kenya)
@@ -61,6 +99,9 @@ load_history = []
 battery_history = []
 weather_forecast = {}
 alert_history = []  # Track all alerts sent in last 12 hours: (timestamp, type, subject)
+inverter_status = {}  # Track inverter communication status and faults
+inverter_last_seen = {}  # Track when each inverter was last seen
+data_lock = Lock()
 
 # East African Timezone
 EAT = timezone(timedelta(hours=3))
@@ -90,10 +131,7 @@ def get_weather_forecast():
         return None
 
 def analyze_solar_conditions(forecast):
-    """Analyze upcoming solar conditions - smart daytime-only analysis
-    - During night (6 PM - 6 AM): Look at tomorrow's daytime (6 AM - 6 PM)
-    - During day (6 AM - 6 PM): Look at remaining daylight hours today
-    """
+    """Analyze upcoming solar conditions - smart daytime-only analysis"""
     if not forecast:
         return None
     
@@ -162,19 +200,20 @@ def send_email(subject, html_content, alert_type="general"):
         return False
     
     # Rate limit: different cooldowns for different alert types
-    # Tiered cooldown system - more urgent alerts can send more frequently
     cooldown_map = {
         "critical": 30,           # Generator starting - every 30 min
-        "very_high_load": 15,     # >2500W - every 15 min (most frequent)
+        "very_high_load": 30,     # >5000W with heavy battery discharge
         "backup_active": 60,      # Backup supplying power - every 60 min
-        "high_load": 30,          # 1500-2500W - every 30 min
-        "moderate_load": 60,      # 1000-1500W with low battery - every 60 min
-        "warning": 60,            # Primary battery warning - every 60 min
+        "high_load": 60,          # 3000-5000W with battery discharge
+        "moderate_load": 120,     # 2000-3000W with battery discharge
+        "warning": 120,           # Primary battery warning
+        "fault": 60,              # Inverter fault
+        "comms_loss": 30,         # Communication loss
         "test": 0,                # Test alerts - no cooldown
-        "general": 60             # Default - every 60 min
+        "general": 120            # Default - every 120 min
     }
     
-    cooldown_minutes = cooldown_map.get(alert_type, 60)
+    cooldown_minutes = cooldown_map.get(alert_type, 120)
     
     if alert_type in last_alert_time and cooldown_minutes > 0:
         if datetime.now(EAT) - last_alert_time[alert_type] < timedelta(minutes=cooldown_minutes):
@@ -222,10 +261,110 @@ def send_email(subject, html_content, alert_type="general"):
         return False
 
 # ----------------------------
+# Backup Battery Status Helper
+# ----------------------------
+def get_backup_battery_status(voltage):
+    """Get backup battery status based on voltage"""
+    if voltage >= BACKUP_VOLTAGE_GOOD:
+        return "Good", "green"
+    elif voltage >= BACKUP_VOLTAGE_WARNING:
+        return "Medium", "orange"
+    elif voltage >= BACKUP_VOLTAGE_THRESHOLD:
+        return "Low", "red"
+    else:
+        return "Critical", "darkred"
+
+# ----------------------------
+# Fault Detection Functions
+# ----------------------------
+def check_inverter_faults(inverter_data):
+    """Check for inverter faults and communication issues"""
+    now = datetime.now(EAT)
+    
+    for inv in inverter_data:
+        sn = inv['SN']
+        inverter_last_seen[sn] = now
+        
+        # Check for communication loss
+        if inv.get('lost', False) or inv.get('errorCode', 0) != 0 or inv.get('faultCode', 0) != 0:
+            fault_code = inv.get('faultCode', 0)
+            error_code = inv.get('errorCode', 0)
+            status_code = inv.get('status', 2)  # Default to discharge
+            
+            # Only send alert if we haven't sent one recently for this inverter
+            alert_key = f"fault_{sn}"
+            if alert_key not in last_alert_time or (now - last_alert_time[alert_key]) > timedelta(minutes=60):
+                
+                # Get fault description
+                fault_desc = FAULT_CODES.get(fault_code, f"Unknown fault code: {fault_code}")
+                
+                send_email(
+                    subject=f"⚠️ INVERTER FAULT: {inv['Label']}",
+                    html_content=f"""
+                    <div style="font-family: Arial; padding: 20px; background: #fff3cd; border-left: 5px solid #dc3545;">
+                        <h2 style="color: #dc3545;">⚠️ INVERTER FAULT DETECTED</h2>
+                        
+                        <p><strong>Inverter Details:</strong></p>
+                        <ul>
+                            <li>Inverter: {inv['Label']} ({sn})</li>
+                            <li>Status: {INVERTER_STATUS_CODES.get(status_code, 'Unknown')}</li>
+                            <li>Fault Code: {fault_code} - {fault_desc}</li>
+                            <li>Error Code: {error_code}</li>
+                            <li>Battery Voltage: {inv.get('vBat', 0):.1f}V</li>
+                            <li>Output Power: {inv.get('OutputPower', 0):.0f}W</li>
+                        </ul>
+                        
+                        <p><strong>⚠️ ACTION REQUIRED:</strong></p>
+                        <p>Check the inverter immediately. This may indicate hardware failure or communication issues.</p>
+                    </div>
+                    """,
+                    alert_type="fault"
+                )
+                last_alert_time[alert_key] = now
+    
+    # Check for communication loss (inverter not responding for >15 minutes)
+    for sn in SERIAL_NUMBERS:
+        if sn in inverter_last_seen:
+            time_since_last_seen = now - inverter_last_seen[sn]
+            if time_since_last_seen > timedelta(minutes=15):
+                alert_key = f"comms_loss_{sn}"
+                if alert_key not in last_alert_time or (now - last_alert_time[alert_key]) > timedelta(minutes=30):
+                    config = INVERTER_CONFIG.get(sn, {"label": f"Inverter {sn}"})
+                    send_email(
+                        subject=f"🚨 COMMUNICATION LOST: {config['label']}",
+                        html_content=f"""
+                        <div style="font-family: Arial; padding: 20px; background: #fff3cd; border-left: 5px solid #dc3545;">
+                            <h2 style="color: #dc3545;">🚨 INVERTER COMMUNICATION LOST</h2>
+                            
+                            <p><strong>Inverter Details:</strong></p>
+                            <ul>
+                                <li>Inverter: {config['label']} ({sn})</li>
+                                <li>Last Seen: {inverter_last_seen[sn].strftime('%Y-%m-%d %H:%M:%S')}</li>
+                                <li>Time Since Last Communication: {time_since_last_seen.seconds // 60} minutes</li>
+                            </ul>
+                            
+                            <p><strong>⚠️ ACTION REQUIRED:</strong></p>
+                            <p>The inverter has stopped communicating. Check:</p>
+                            <ol>
+                                <li>Power supply to the inverter</li>
+                                <li>Network connectivity</li>
+                                <li>Inverter status lights</li>
+                                <li>Data logger connection</li>
+                            </ol>
+                        </div>
+                        """,
+                        alert_type="comms_loss"
+                    )
+                    last_alert_time[alert_key] = now
+
+# ----------------------------
 # Intelligent Alert Logic
 # ----------------------------
-def check_and_send_alerts(inverter_data, solar_conditions):
+def check_and_send_alerts(inverter_data, solar_conditions, total_battery_discharge):
     """Smart alert logic based on cascade inverter architecture"""
+    
+    # Check for inverter faults first
+    check_inverter_faults(inverter_data)
     
     # Extract data for each inverter
     inv1 = next((i for i in inverter_data if i['SN'] == 'RKG3B0400T'), None)
@@ -238,7 +377,6 @@ def check_and_send_alerts(inverter_data, solar_conditions):
     
     # Calculate primary battery levels (minimum of Inv1 and Inv2)
     primary_capacity = min(inv1['Capacity'], inv2['Capacity'])
-    backup_capacity = inv3_backup['Capacity']
     backup_voltage = inv3_backup['vBat']
     
     # Total load across all inverters
@@ -247,10 +385,13 @@ def check_and_send_alerts(inverter_data, solar_conditions):
     # Check backup inverter status
     backup_active = inv3_backup['OutputPower'] > 50  # Backup is supplying power
     
+    # Backup battery status
+    backup_status, _ = get_backup_battery_status(backup_voltage)
+    
     # ============================================
     # CRITICAL ALERT: Generator about to start
     # ============================================
-    if backup_voltage < 51.2:
+    if backup_voltage < BACKUP_VOLTAGE_THRESHOLD:
         send_email(
             subject="🚨 CRITICAL: Generator Starting - Backup Battery Critical",
             html_content=f"""
@@ -259,8 +400,7 @@ def check_and_send_alerts(inverter_data, solar_conditions):
                 
                 <p><strong>Backup Inverter (Inv 3) Status:</strong></p>
                 <ul>
-                    <li>Battery Voltage: <strong style="color: #dc3545;">{backup_voltage:.1f}V</strong> (Threshold: 51.2V)</li>
-                    <li>Battery Capacity: {backup_capacity:.0f}%</li>
+                    <li>Battery Voltage: <strong style="color: #dc3545;">{backup_voltage:.1f}V</strong> (Threshold: {BACKUP_VOLTAGE_THRESHOLD}V)</li>
                     <li>Status: Generator starting or already running</li>
                 </ul>
                 
@@ -269,10 +409,11 @@ def check_and_send_alerts(inverter_data, solar_conditions):
                     <li>Inverter 1 Battery: {inv1['Capacity']:.0f}%</li>
                     <li>Inverter 2 Battery: {inv2['Capacity']:.0f}%</li>
                     <li>Combined Load: {total_load:.0f}W</li>
+                    <li>Battery Discharge: {total_battery_discharge:.0f}W</li>
                 </ul>
                 
                 <p><strong>⚠️ ACTION REQUIRED:</strong></p>
-                <p>The backup battery voltage has dropped below 51.2V. The generator should be starting automatically.</p>
+                <p>The backup battery voltage has dropped below {BACKUP_VOLTAGE_THRESHOLD}V. The generator should be starting automatically.</p>
                 <p><strong>REDUCE LOADS NOW:</strong></p>
                 <ol>
                     <li>Turn OFF all Ovens</li>
@@ -300,8 +441,9 @@ def check_and_send_alerts(inverter_data, solar_conditions):
                 <p><strong>System Status:</strong></p>
                 <ul>
                     <li>Backup Inverter (Inv 3): <strong style="color: #ff9800;">ACTIVE</strong> - Supplying {inv3_backup['OutputPower']:.0f}W</li>
-                    <li>Backup Battery: {backup_capacity:.0f}% ({backup_voltage:.1f}V)</li>
-                    <li>Primary Batteries: <strong style="color: #dc3545;">{primary_capacity:.0f}%</strong> (Below 40% threshold)</li>
+                    <li>Backup Battery: {backup_status} ({backup_voltage:.1f}V)</li>
+                    <li>Primary Batteries: <strong style="color: #dc3545;">{primary_capacity:.0f}%</strong> (Below {PRIMARY_BATTERY_THRESHOLD}% threshold)</li>
+                    <li>Battery Discharge: {total_battery_discharge:.0f}W</li>
                 </ul>
                 
                 <p><strong>Individual Inverter Status:</strong></p>
@@ -312,8 +454,8 @@ def check_and_send_alerts(inverter_data, solar_conditions):
                 </ul>
                 
                 <p><strong>⚠️ WARNING:</strong></p>
-                <p>Primary inverter batteries are below 40%. Backup inverter is now supplying power to the primary inverters. 
-                If backup voltage drops below 51.2V, the generator will start automatically.</p>
+                <p>Primary inverter batteries are below {PRIMARY_BATTERY_THRESHOLD}%. Backup inverter is now supplying power to the primary inverters. 
+                If backup voltage drops below {BACKUP_VOLTAGE_THRESHOLD}V, the generator will start automatically.</p>
                 
                 <p><strong>Action Required:</strong></p>
                 <ul>
@@ -330,9 +472,9 @@ def check_and_send_alerts(inverter_data, solar_conditions):
         )
     
     # ============================================
-    # WARNING: Primary batteries approaching 40%
+    # WARNING: Primary batteries approaching threshold
     # ============================================
-    elif 40 < primary_capacity < 50:
+    elif PRIMARY_BATTERY_THRESHOLD < primary_capacity < 50 and total_battery_discharge > 500:
         send_email(
             subject="⚠️ WARNING: Primary Battery Low - Backup Activation Soon",
             html_content=f"""
@@ -341,15 +483,16 @@ def check_and_send_alerts(inverter_data, solar_conditions):
                 
                 <p><strong>System Status:</strong></p>
                 <ul>
-                    <li>Primary Batteries: <strong style="color: #ff9800;">{primary_capacity:.0f}%</strong> (Approaching 40% threshold)</li>
+                    <li>Primary Batteries: <strong style="color: #ff9800;">{primary_capacity:.0f}%</strong> (Approaching {PRIMARY_BATTERY_THRESHOLD}% threshold)</li>
+                    <li>Battery Discharge: {total_battery_discharge:.0f}W</li>
                     <li>Inverter 1: {inv1['Capacity']:.0f}%</li>
                     <li>Inverter 2: {inv2['Capacity']:.0f}%</li>
-                    <li>Backup Battery: {backup_capacity:.0f}% ({backup_voltage:.1f}V)</li>
+                    <li>Backup Battery: {backup_status} ({backup_voltage:.1f}V)</li>
                     <li>Total Load: {total_load:.0f}W</li>
                 </ul>
                 
                 <p><strong>Next Stage:</strong></p>
-                <p>When primary batteries drop below 40%, Backup Inverter (Inv 3) will activate to supply power to the primary inverters.</p>
+                <p>When primary batteries drop below {PRIMARY_BATTERY_THRESHOLD}%, Backup Inverter (Inv 3) will activate to supply power to the primary inverters.</p>
                 
                 {f'<p style="color: #dc3545;"><strong>Weather Alert:</strong> Poor solar forecast (Cloud: {solar_conditions["avg_cloud_cover"]:.0f}%). Consider reducing non-essential loads now.</p>' if solar_conditions and solar_conditions['poor_conditions'] else f'<p style="color: #28a745;"><strong>Weather:</strong> Good conditions expected. Batteries should recover.</p>' if solar_conditions else ''}
                 
@@ -360,33 +503,36 @@ def check_and_send_alerts(inverter_data, solar_conditions):
         )
     
     # ============================================
-    # TIERED HIGH LOAD ALERTS
+    # TIERED HIGH LOAD ALERTS (Based on battery discharge)
+    # Only alert when battery is being heavily discharged
     # ============================================
     
-    # TIER 3: Very High Load (>2500W) - URGENT
-    if total_load >= 2500:
+    # TIER 3: Very High Load (>5000W) with heavy battery discharge
+    if total_load >= TIER3_LOAD_THRESHOLD and total_battery_discharge > 2000:
         send_email(
-            subject="🚨 URGENT: Very High Power Usage - Immediate Action Required",
+            subject="🚨 URGENT: Very High Power Usage Draining Battery",
             html_content=f"""
             <div style="font-family: Arial; padding: 20px; background: #fff3cd; border-left: 5px solid #dc3545;">
-                <h2 style="color: #dc3545;">🚨 URGENT: VERY HIGH POWER USAGE</h2>
+                <h2 style="color: #dc3545;">🚨 URGENT: HIGH LOAD DRAINING BATTERY</h2>
                 
                 <p><strong>Current Status:</strong></p>
                 <ul>
-                    <li>Total Load: <strong style="color: #dc3545;">{total_load:.0f}W</strong> (CRITICAL - Above 2500W)</li>
+                    <li>Total Load: <strong style="color: #dc3545;">{total_load:.0f}W</strong> (Above {TIER3_LOAD_THRESHOLD}W)</li>
+                    <li>Battery Discharge: <strong style="color: #dc3545;">{total_battery_discharge:.0f}W</strong> (CRITICAL)</li>
                     <li>Primary Batteries: {primary_capacity:.0f}%</li>
-                    <li>Backup Battery: {backup_capacity:.0f}% ({backup_voltage:.1f}V)</li>
+                    <li>Backup Battery: {backup_status} ({backup_voltage:.1f}V)</li>
+                    <li>Solar Generation: {(inv1.get('ppv', 0) + inv2.get('ppv', 0) + inv3_backup.get('ppv', 0)):.0f}W</li>
                 </ul>
                 
                 <p><strong>Individual Loads:</strong></p>
                 <ul>
                     <li>Inverter 1: {inv1['OutputPower']:.0f}W ({inv1['Capacity']:.0f}%)</li>
                     <li>Inverter 2: {inv2['OutputPower']:.0f}W ({inv2['Capacity']:.0f}%)</li>
-                    <li>Inverter 3: {inv3_backup['OutputPower']:.0f}W ({inv3_backup['Capacity']:.0f}%)</li>
+                    <li>Inverter 3: {inv3_backup['OutputPower']:.0f}W</li>
                 </ul>
                 
                 <p><strong>⚠️ IMMEDIATE ACTION REQUIRED:</strong></p>
-                <p>Power consumption is critically high. This level of usage will rapidly drain batteries.</p>
+                <p>Power consumption is critically high and draining batteries rapidly.</p>
                 <ul>
                     <li>Turn OFF Oven immediately</li>
                     <li>Turn OFF water heater (if used)</li>
@@ -395,25 +541,27 @@ def check_and_send_alerts(inverter_data, solar_conditions):
                     <li>Reduce to essential loads only</li>
                 </ul>
                 
-                {f'<p style="color: #dc3545;"><strong>Weather Alert:</strong> Poor solar conditions expected (Cloud: {solar_conditions["avg_cloud_cover"]:.0f}%). Battery recovery will be limited.</p>' if solar_conditions and solar_conditions['poor_conditions'] else f'<p style="color: #28a745;"><strong>Weather:</strong> Good solar expected (Cloud: {solar_conditions["avg_cloud_cover"]:.0f}%). Batteries should recover if load reduced.</p>' if solar_conditions else ''}
+                {f'<p style="color: #dc3545;"><strong>Weather Alert:</strong> Poor solar conditions expected (Cloud: {solar_conditions["avg_cloud_cover"]:.0f}%). Battery recovery will be limited.</p>' if solar_conditions and solar_conditions['poor_conditions'] else f'<p style="color: #28a745;"><strong>Weather:</strong> Good solar expected (Cloud: {solar_conditions["avg_cloud_cover"]:.0f}%). Reduce load to allow battery recovery.</p>' if solar_conditions else ''}
             </div>
             """,
             alert_type="very_high_load"
         )
     
-    # TIER 2: High Load (1500-2500W) - WARNING
-    elif 1500 <= total_load < 2500:
+    # TIER 2: High Load (3000-5000W) with battery discharge
+    elif TIER2_LOAD_THRESHOLD <= total_load < TIER3_LOAD_THRESHOLD and total_battery_discharge > 1000:
         send_email(
-            subject="⚠️ WARNING: High Power Usage Detected",
+            subject="⚠️ WARNING: High Power Usage Draining Battery",
             html_content=f"""
             <div style="font-family: Arial; padding: 20px; background: #fff9e6; border-left: 5px solid #ff9800;">
-                <h2 style="color: #ff9800;">⚠️ HIGH POWER USAGE</h2>
+                <h2 style="color: #ff9800;">⚠️ HIGH POWER USAGE DRAINING BATTERY</h2>
                 
                 <p><strong>Current Status:</strong></p>
                 <ul>
-                    <li>Total Load: <strong style="color: #ff9800;">{total_load:.0f}W</strong> (High - Above 1500W)</li>
+                    <li>Total Load: <strong style="color: #ff9800;">{total_load:.0f}W</strong> (Above {TIER2_LOAD_THRESHOLD}W)</li>
+                    <li>Battery Discharge: <strong style="color: #ff9800;">{total_battery_discharge:.0f}W</strong> (High)</li>
                     <li>Primary Batteries: {primary_capacity:.0f}%</li>
-                    <li>Backup Battery: {backup_capacity:.0f}% ({backup_voltage:.1f}V)</li>
+                    <li>Backup Battery: {backup_status} ({backup_voltage:.1f}V)</li>
+                    <li>Solar Generation: {(inv1.get('ppv', 0) + inv2.get('ppv', 0) + inv3_backup.get('ppv', 0)):.0f}W</li>
                 </ul>
                 
                 <p><strong>Individual Loads:</strong></p>
@@ -424,45 +572,40 @@ def check_and_send_alerts(inverter_data, solar_conditions):
                 </ul>
                 
                 <p><strong>Recommendation:</strong></p>
-                <p>Power usage is high. Consider reducing load, especially if batteries are not at full capacity.</p>
+                <p>Power usage is high and draining batteries. Consider reducing load.</p>
                 <ul>
                     <li>Avoid using multiple high-power devices simultaneously</li>
                     <li>Turn off Oven if cooking is complete</li>
                     <li>Monitor battery levels</li>
                 </ul>
                 
-                {f'<p style="color: #dc3545;"><strong>Weather Alert:</strong> Poor solar forecast (Cloud: {solar_conditions["avg_cloud_cover"]:.0f}%). Consider reducing usage.</p>' if solar_conditions and solar_conditions['poor_conditions'] else f'<p style="color: #28a745;"><strong>Weather:</strong> Good solar conditions expected. System should handle load.</p>' if solar_conditions else ''}
+                {f'<p style="color: #dc3545;"><strong>Weather Alert:</strong> Poor solar forecast (Cloud: {solar_conditions["avg_cloud_cover"]:.0f}%). Consider reducing usage.</p>' if solar_conditions and solar_conditions['poor_conditions'] else f'<p style="color: #28a745;"><strong>Weather:</strong> Good solar conditions expected. Reduce load to allow battery recovery.</p>' if solar_conditions else ''}
             </div>
             """,
             alert_type="high_load"
         )
     
-    # TIER 1: Moderate Load (1000-1500W) with Low Battery - INFO
-    elif 1000 <= total_load < 1500 and primary_capacity < 50:
+    # TIER 1: Moderate Load (2000-3000W) with battery discharge and low battery
+    elif TIER1_LOAD_THRESHOLD <= total_load < TIER2_LOAD_THRESHOLD and total_battery_discharge > 500 and primary_capacity < 50:
         send_email(
-            subject="ℹ️ INFO: Moderate Load with Low Battery",
+            subject="ℹ️ INFO: Moderate Load with Battery Drain",
             html_content=f"""
             <div style="font-family: Arial; padding: 20px; background: #e7f3ff; border-left: 5px solid #2196F3;">
-                <h2 style="color: #2196F3;">ℹ️ MODERATE POWER USAGE - LOW BATTERY</h2>
+                <h2 style="color: #2196F3;">ℹ️ MODERATE POWER USAGE - BATTERY DRAIN</h2>
                 
                 <p><strong>Current Status:</strong></p>
                 <ul>
                     <li>Total Load: {total_load:.0f}W (Moderate)</li>
+                    <li>Battery Discharge: {total_battery_discharge:.0f}W</li>
                     <li>Primary Batteries: <strong style="color: #ff9800;">{primary_capacity:.0f}%</strong> (Below 50%)</li>
-                    <li>Backup Battery: {backup_capacity:.0f}%</li>
-                </ul>
-                
-                <p><strong>Individual Loads:</strong></p>
-                <ul>
-                    <li>Inverter 1: {inv1['OutputPower']:.0f}W</li>
-                    <li>Inverter 2: {inv2['OutputPower']:.0f}W</li>
-                    <li>Inverter 3: {inv3_backup['OutputPower']:.0f}W</li>
+                    <li>Backup Battery: {backup_status} ({backup_voltage:.1f}V)</li>
+                    <li>Solar Generation: {(inv1.get('ppv', 0) + inv2.get('ppv', 0) + inv3_backup.get('ppv', 0)):.0f}W</li>
                 </ul>
                 
                 <p><strong>Advisory:</strong></p>
-                <p>Current power usage is moderate but batteries are below 50%. Consider conserving energy.</p>
+                <p>Current power usage is moderate but batteries are below 50% and discharging. Consider conserving energy.</p>
                 
-                {f'<p style="color: #ff9800;"><strong>Weather:</strong> Poor solar ahead (Cloud: {solar_conditions["avg_cloud_cover"]:.0f}%). Battery recovery may be slow.</p>' if solar_conditions and solar_conditions['poor_conditions'] else f'<p style="color: #28a745;"><strong>Weather:</strong> Good solar expected. Batteries should recover.</p>' if solar_conditions else ''}
+                {f'<p style="color: #ff9800;"><strong>Weather:</strong> Poor solar ahead (Cloud: {solar_conditions["avg_cloud_cover"]:.0f}%). Battery recovery may be slow.</p>' if solar_conditions and solar_conditions['poor_conditions'] else f'<p style="color: #28a745;"><strong>Weather:</strong> Good solar expected. Batteries should recover if load is reduced.</p>' if solar_conditions else ''}
             </div>
             """,
             alert_type="moderate_load"
@@ -492,55 +635,101 @@ def poll_growatt():
             backup_data = None
             
             for sn in SERIAL_NUMBERS:
-                response = requests.post(
-                    API_URL,
-                    data={"storage_sn": sn},
-                    headers=headers,
-                    timeout=20
-                )
-                response.raise_for_status()
-                data = response.json().get("data", {})
-                
-                # Get configuration
-                config = INVERTER_CONFIG.get(sn, {"label": sn, "type": "unknown", "datalog": "N/A"})
-                
-                # Extract key metrics
-                out_power = float(data.get("outPutPower") or 0)
-                capacity = float(data.get("capacity") or 0)
-                v_bat = float(data.get("vBat") or 0)
-                p_bat = float(data.get("pBat") or 0)
-                
-                total_output_power += out_power
-                
-                if p_bat > 0:
-                    total_battery_discharge_W += p_bat
-                
-                inv_info = {
-                    "SN": sn,
-                    "Label": config['label'],
-                    "Type": config['type'],
-                    "DataLog": config['datalog'],
-                    "OutputPower": out_power,
-                    "Capacity": capacity,
-                    "vBat": v_bat,
-                    "pBat": p_bat,
-                    "Status": data.get("statusText", "Unknown")
-                }
-                
-                inverter_data.append(inv_info)
-                
-                # Track primary vs backup
-                if config['type'] == 'primary':
-                    if capacity > 0:
-                        primary_capacities.append(capacity)
-                elif config['type'] == 'backup':
-                    backup_data = inv_info
+                try:
+                    response = requests.post(
+                        API_URL,
+                        data={"storage_sn": sn},
+                        headers=headers,
+                        timeout=20
+                    )
+                    response.raise_for_status()
+                    json_data = response.json()
+                    
+                    if json_data.get("code") != 0:
+                        print(f"✗ API error for {sn}: {json_data.get('message', 'Unknown error')}")
+                        continue
+                    
+                    # Parse the new data structure
+                    storage_data = json_data.get("data", {}).get("storage", [])
+                    if not storage_data:
+                        print(f"✗ No storage data for {sn}")
+                        continue
+                    
+                    data = storage_data[0]
+                    
+                    # Get configuration
+                    config = INVERTER_CONFIG.get(sn, {"label": sn, "type": "unknown", "datalog": "N/A", "order": 99})
+                    
+                    # Extract key metrics using the correct field names from the API
+                    out_power = float(data.get("outPutPower") or 0)
+                    capacity = float(data.get("capacity") or 0)
+                    v_bat = float(data.get("vBat") or 0)
+                    
+                    # Calculate battery power: pDischarge is positive when discharging, pCharge is positive when charging
+                    p_discharge = float(data.get("pDischarge") or 0)
+                    p_charge = float(data.get("pCharge") or 0)
+                    p_bat = p_discharge - p_charge  # Positive = discharging, Negative = charging
+                    
+                    # Get status and fault information
+                    status_num = int(data.get("status", 2))
+                    fault_code = int(data.get("faultCode", 0))
+                    error_code = int(data.get("errorCode", 0))
+                    warn_code = int(data.get("warnCode", 0))
+                    
+                    # Get solar generation
+                    p_pv = float(data.get("ppv") or 0)
+                    
+                    total_output_power += out_power
+                    
+                    if p_bat > 0:
+                        total_battery_discharge_W += p_bat
+                    
+                    inv_info = {
+                        "SN": sn,
+                        "Label": config['label'],
+                        "Type": config['type'],
+                        "Order": config['order'],
+                        "DataLog": config['datalog'],
+                        "OutputPower": out_power,
+                        "Capacity": capacity,
+                        "vBat": v_bat,
+                        "pBat": p_bat,
+                        "ppv": p_pv,
+                        "status": status_num,
+                        "faultCode": fault_code,
+                        "errorCode": error_code,
+                        "warnCode": warn_code,
+                        "lost": data.get("lost", False),
+                        "StatusText": data.get("statusText", "Unknown"),
+                        "time": data.get("time", "")
+                    }
+                    
+                    inverter_data.append(inv_info)
+                    
+                    # Track primary vs backup
+                    if config['type'] == 'primary':
+                        if capacity > 0:
+                            primary_capacities.append(capacity)
+                    elif config['type'] == 'backup':
+                        backup_data = inv_info
+                        
+                except Exception as e:
+                    print(f"✗ Error polling inverter {sn}: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    continue
+            
+            # Sort inverters by order (1, 2, 3)
+            inverter_data.sort(key=lambda x: x.get('Order', 99))
             
             # Calculate system-wide metrics
             primary_battery_min = min(primary_capacities) if primary_capacities else 0
-            backup_battery = backup_data['Capacity'] if backup_data else 0
             backup_voltage = backup_data['vBat'] if backup_data else 0
             backup_active = backup_data['OutputPower'] > 50 if backup_data else False
+            backup_status, backup_color = get_backup_battery_status(backup_voltage)
+            
+            # Check if any inverter has a fault
+            has_fault = any(inv.get('faultCode', 0) != 0 or inv.get('errorCode', 0) != 0 for inv in inverter_data)
             
             # Save latest readings
             latest_data = {
@@ -548,10 +737,12 @@ def poll_growatt():
                 "total_output_power": total_output_power,
                 "total_battery_discharge_W": total_battery_discharge_W,
                 "primary_battery_min": primary_battery_min,
-                "backup_battery": backup_battery,
                 "backup_voltage": backup_voltage,
+                "backup_status": backup_status,
                 "backup_active": backup_active,
-                "inverters": inverter_data
+                "has_fault": has_fault,
+                "inverters": inverter_data,
+                "solar_generation": sum(inv.get('ppv', 0) for inv in inverter_data)
             }
             
             # Append to history
@@ -561,14 +752,20 @@ def poll_growatt():
             battery_history.append((now, total_battery_discharge_W))
             battery_history = [(t, p) for t, p in battery_history if t >= now - timedelta(hours=12)]
             
-            print(f"{latest_data['timestamp']} | Load={total_output_power:.0f}W | Primary={primary_battery_min:.0f}% | Backup={backup_battery:.0f}% ({backup_voltage:.1f}V) | Backup Active={backup_active}")
+            # Print status with more details
+            status_summary = f"{latest_data['timestamp']} | Load={total_output_power:.0f}W | Solar={latest_data['solar_generation']:.0f}W | "
+            status_summary += f"BattDis={total_battery_discharge_W:.0f}W | Primary={primary_battery_min:.0f}% | "
+            status_summary += f"Backup={backup_voltage:.1f}V ({backup_status}) | Backup Active={backup_active}"
+            if has_fault:
+                status_summary += " | ⚠️ FAULT DETECTED"
+            print(status_summary)
             
             # Check alerts with solar conditions
             solar_conditions = analyze_solar_conditions(weather_forecast)
-            check_and_send_alerts(inverter_data, solar_conditions)
+            check_and_send_alerts(inverter_data, solar_conditions, total_battery_discharge_W)
         
         except Exception as e:
-            print(f"❌ Error polling Growatt: {e}")
+            print(f"❌ Error in polling loop: {e}")
             import traceback
             traceback.print_exc()
         
@@ -580,22 +777,36 @@ def poll_growatt():
 @app.route("/")
 def home():
     primary_battery = latest_data.get("primary_battery_min", 0)
-    backup_battery = latest_data.get("backup_battery", 0)
     backup_voltage = latest_data.get("backup_voltage", 0)
+    backup_status = latest_data.get("backup_status", "Unknown")
     backup_active = latest_data.get("backup_active", False)
     total_load = latest_data.get("total_output_power", 0)
+    solar_generation = latest_data.get("solar_generation", 0)
+    has_fault = latest_data.get("has_fault", False)
     
-    # Color coding
-    primary_color = "red" if primary_battery < 40 else ("orange" if primary_battery < 50 else "green")
-    backup_color = "red" if backup_voltage < 51.2 else ("orange" if backup_battery < 30 else "green")
+    # Color coding for primary battery
+    primary_color = "red" if primary_battery < PRIMARY_BATTERY_THRESHOLD else ("orange" if primary_battery < 50 else "green")
+    
+    # Color coding for backup battery based on voltage
+    if backup_voltage >= BACKUP_VOLTAGE_GOOD:
+        backup_color = "green"
+    elif backup_voltage >= BACKUP_VOLTAGE_WARNING:
+        backup_color = "orange"
+    elif backup_voltage >= BACKUP_VOLTAGE_THRESHOLD:
+        backup_color = "red"
+    else:
+        backup_color = "darkred"
     
     # Chart data
-    times = [t.strftime('%H:%M') for t, p in load_history]
-    load_values = [p for t, p in load_history]
-    battery_values = [p for t, p in battery_history]
+    times = [t.strftime('%H:%M') for t, p in load_history[-48:]]  # Last 48 data points
+    load_values = [p for t, p in load_history[-48:]]
+    battery_values = [p for t, p in battery_history[-48:]]
     
     # Solar conditions
     solar_conditions = analyze_solar_conditions(weather_forecast)
+    
+    # Get inverter status for display
+    inverters_sorted = sorted(latest_data.get("inverters", []), key=lambda x: x.get('Order', 99))
     
     html = f"""
 <!DOCTYPE html>
@@ -665,7 +876,10 @@ def home():
         }}
         
         .system-status {{
-            background: {'linear-gradient(135deg, #eb3349 0%, #f45c43 100%)' if backup_voltage < 51.2 else 'linear-gradient(135deg, #f77f00 0%, #fcbf49 100%)' if backup_active else 'linear-gradient(135deg, #11998e 0%, #38ef7d 100%)'};
+            background: {'linear-gradient(135deg, #8B0000 0%, #DC143C 100%)' if backup_voltage < BACKUP_VOLTAGE_THRESHOLD else 
+                        'linear-gradient(135deg, #f77f00 0%, #fcbf49 100%)' if backup_active else 
+                        'linear-gradient(135deg, #11998e 0%, #38ef7d 100%)' if not has_fault else
+                        'linear-gradient(135deg, #8B0000 0%, #DC143C 100%)'};
             color: white;
             padding: 20px;
             border-radius: 10px;
@@ -715,6 +929,10 @@ def home():
         
         .metric.blue {{
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        }}
+        
+        .metric.darkred {{
+            background: linear-gradient(135deg, #8B0000 0%, #DC143C 100%);
         }}
         
         .metric-label {{
@@ -774,6 +992,18 @@ def home():
         .inverter-card.backup {{
             border-left-color: #f77f00;
             background: #fff9f0;
+        }}
+        
+        .inverter-card.fault {{
+            border-left-color: #dc3545;
+            background: #fff3f3;
+            animation: pulse 2s infinite;
+        }}
+        
+        @keyframes pulse {{
+            0% {{ box-shadow: 0 0 0 0 rgba(220, 53, 69, 0.4); }}
+            70% {{ box-shadow: 0 0 0 10px rgba(220, 53, 69, 0); }}
+            100% {{ box-shadow: 0 0 0 0 rgba(220, 53, 69, 0); }}
         }}
         
         .inverter-card h3 {{
@@ -903,6 +1133,23 @@ def home():
             font-size: 0.9em;
             text-shadow: 1px 1px 3px rgba(0,0,0,0.5);
         }}
+        
+        .fault-indicator {{
+            display: inline-block;
+            background: #dc3545;
+            color: white;
+            padding: 5px 15px;
+            border-radius: 20px;
+            font-size: 0.9em;
+            margin-left: 10px;
+            animation: blink 1s infinite;
+        }}
+        
+        @keyframes blink {{
+            0% {{ opacity: 1; }}
+            50% {{ opacity: 0.5; }}
+            100% {{ opacity: 1; }}
+        }}
     </style>
 </head>
 <body>
@@ -919,13 +1166,18 @@ def home():
             </div>
             
             <div class="system-status">
-                <h2>{'🚨 GENERATOR ACTIVE / STARTING' if backup_voltage < 51.2 else '⚠️ BACKUP SYSTEM ACTIVE' if backup_active else '✓ NORMAL OPERATION'}</h2>
+                <h2>
+                    {'🚨 GENERATOR ACTIVE / STARTING' if backup_voltage < BACKUP_VOLTAGE_THRESHOLD else 
+                     '⚠️ BACKUP SYSTEM ACTIVE' if backup_active else 
+                     '⚠️ SYSTEM FAULT DETECTED' if has_fault else 
+                     '✓ NORMAL OPERATION'}
+                     {has_fault and backup_voltage >= BACKUP_VOLTAGE_THRESHOLD and not backup_active and '<span class="fault-indicator">FAULT</span>' or ''}
+                </h2>
                 <div class="status-text">
-                    {
-                        'Backup battery voltage critical. Generator should be running.' if backup_voltage < 51.2 else
-                        f'Primary batteries below 40%. Backup inverter supplying {latest_data.get("inverters", [{}])[2].get("OutputPower", 0) if len(latest_data.get("inverters", [])) > 2 else 0:.0f}W to system.' if backup_active else
-                        'All systems operating on primary batteries.'
-                    }
+                    {f'Backup battery voltage critical ({backup_voltage:.1f}V). Generator should be running.' if backup_voltage < BACKUP_VOLTAGE_THRESHOLD else
+                     f'Primary batteries below {PRIMARY_BATTERY_THRESHOLD}%. Backup inverter supplying {inverters_sorted[2].get("OutputPower", 0) if len(inverters_sorted) > 2 else 0:.0f}W to system.' if backup_active else
+                     '⚠️ One or more inverters reporting faults. Check inverter details.' if has_fault else
+                     'All systems operating on primary batteries.'}
                 </div>
             </div>
 """
@@ -945,18 +1197,27 @@ def home():
             </div>
 """
     
+    # Load analysis note
+    load_note = ""
+    if total_load > 2000 and latest_data.get('total_battery_discharge_W', 0) < 500:
+        load_note = f"<div style='background: #e7f3ff; padding: 10px; border-radius: 5px; margin-bottom: 15px;'><strong>ℹ️ Note:</strong> High load ({total_load:.0f}W) is being supported by solar ({solar_generation:.0f}W), not batteries.</div>"
+    elif total_load > 2000:
+        load_note = f"<div style='background: #fff3cd; padding: 10px; border-radius: 5px; margin-bottom: 15px;'><strong>⚠️ Warning:</strong> High load ({total_load:.0f}W) is draining batteries ({latest_data.get('total_battery_discharge_W', 0):.0f}W discharge).</div>"
+    
+    html += load_note
+    
     html += f"""
             <div class="metrics-grid">
                 <div class="metric {primary_color}">
                     <div class="metric-label">Primary Batteries</div>
                     <div class="metric-value">{primary_battery:.0f}%</div>
-                    <div class="metric-subtext">Inverters 1 & 2 (Min)</div>
+                    <div class="metric-subtext">Inverters 1 & 2 (Minimum)</div>
                 </div>
                 
                 <div class="metric {backup_color}">
                     <div class="metric-label">Backup Battery</div>
-                    <div class="metric-value">{backup_battery:.0f}%</div>
-                    <div class="metric-subtext">{backup_voltage:.1f}V {'(Generator at 51.2V)' if backup_voltage > 51.2 else '(GENERATOR THRESHOLD!)'}</div>
+                    <div class="metric-value">{backup_voltage:.1f}V</div>
+                    <div class="metric-subtext">{backup_status} {'(Generator threshold: 51.2V)' if backup_voltage >= BACKUP_VOLTAGE_THRESHOLD else '(GENERATOR STARTING!)'}</div>
                 </div>
                 
                 <div class="metric blue">
@@ -970,23 +1231,58 @@ def home():
                     <div class="metric-value">{'ACTIVE' if backup_active else 'Standby'}</div>
                     <div class="metric-subtext">{'Supplying Power' if backup_active else 'Ready'}</div>
                 </div>
+                
+                <div class="metric {'red' if solar_generation < 100 else 'green'}">
+                    <div class="metric-label">Solar Generation</div>
+                    <div class="metric-value">{solar_generation:.0f}W</div>
+                    <div class="metric-subtext">Total PV Power</div>
+                </div>
+                
+                <div class="metric {'orange' if latest_data.get('total_battery_discharge_W', 0) > 500 else 'green'}">
+                    <div class="metric-label">Battery Discharge</div>
+                    <div class="metric-value">{latest_data.get('total_battery_discharge_W', 0):.0f}W</div>
+                    <div class="metric-subtext">Total from all batteries</div>
+                </div>
             </div>
             
             <h2>Inverter Details</h2>
             <div class="inverter-grid">
 """
     
-    # Display each inverter
-    for inv in latest_data.get("inverters", []):
+    # Display each inverter in order
+    for inv in inverters_sorted:
         is_backup = inv.get('Type') == 'backup'
+        has_fault = inv.get('faultCode', 0) != 0 or inv.get('errorCode', 0) != 0
         label = inv.get('Label', 'Unknown')
         sn = inv.get('SN', 'N/A')
         datalog = inv.get('DataLog', 'N/A')
+        status_text = inv.get('StatusText', 'Unknown')
+        fault_code = inv.get('faultCode', 0)
+        error_code = inv.get('errorCode', 0)
         
         html += f"""
-                <div class="inverter-card {'backup' if is_backup else ''}">
-                    <h3>{label}</h3>
+                <div class="inverter-card {'backup' if is_backup else ''} {'fault' if has_fault else ''}">
+                    <h3>{label} {has_fault and '🔴' or ''}</h3>
                     <div class="inv-label">{sn} ({datalog})</div>
+                    {has_fault and f'<div style="background: #ffebee; color: #c62828; padding: 8px; border-radius: 5px; margin-bottom: 10px; font-size: 0.9em;">⚠️ FAULT: Code {fault_code} | Error: {error_code}</div>' or ''}
+                    <div class="inv-stat">
+                        <span class="inv-stat-label">Status</span>
+                        <span class="inv-stat-value">{status_text}</span>
+                    </div>
+        """
+        
+        if is_backup:
+            # For backup inverter, show voltage and status
+            backup_status, _ = get_backup_battery_status(inv.get('vBat', 0))
+            html += f"""
+                    <div class="inv-stat">
+                        <span class="inv-stat-label">Battery Voltage</span>
+                        <span class="inv-stat-value">{inv.get('vBat', 0):.1f}V ({backup_status})</span>
+                    </div>
+            """
+        else:
+            # For primary inverters, show capacity
+            html += f"""
                     <div class="inv-stat">
                         <span class="inv-stat-label">Battery Capacity</span>
                         <span class="inv-stat-value">{inv.get('Capacity', 0):.0f}%</span>
@@ -995,6 +1291,9 @@ def home():
                         <span class="inv-stat-label">Battery Voltage</span>
                         <span class="inv-stat-value">{inv.get('vBat', 0):.1f}V</span>
                     </div>
+            """
+        
+        html += f"""
                     <div class="inv-stat">
                         <span class="inv-stat-label">Output Power</span>
                         <span class="inv-stat-value">{inv.get('OutputPower', 0):.0f}W</span>
@@ -1004,8 +1303,12 @@ def home():
                         <span class="inv-stat-value">{inv.get('pBat', 0):.0f}W</span>
                     </div>
                     <div class="inv-stat">
-                        <span class="inv-stat-label">Status</span>
-                        <span class="inv-stat-value">{inv.get('Status', 'Unknown')}</span>
+                        <span class="inv-stat-label">Solar Power</span>
+                        <span class="inv-stat-value">{inv.get('ppv', 0):.0f}W</span>
+                    </div>
+                    <div class="inv-stat">
+                        <span class="inv-stat-label">Last Update</span>
+                        <span class="inv-stat-value">{inv.get('time', 'Unknown')}</span>
                     </div>
                 </div>
 """
@@ -1034,6 +1337,8 @@ def home():
                 "high_load": ("🟠", "High Load", "#ff9800"),
                 "warning": ("🟡", "Warning", "#ffc107"),
                 "moderate_load": ("🔵", "Moderate Load", "#2196F3"),
+                "fault": ("🔴", "Fault", "#dc3545"),
+                "comms_loss": ("🔴", "Comms Loss", "#8B0000"),
                 "test": ("⚪", "Test", "#9e9e9e"),
                 "general": ("⚪", "Info", "#9e9e9e")
             }
