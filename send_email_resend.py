@@ -4,6 +4,8 @@ import requests
 from datetime import datetime, timedelta, timezone
 from threading import Thread
 from flask import Flask, render_template_string, request, jsonify
+import numpy as np
+from collections import deque
 
 # ----------------------------
 # Flask app
@@ -78,6 +80,12 @@ weather_source = "Initializing..."  # Track which weather service is working
 solar_conditions_cache = None  # Cache analyzed solar conditions
 alert_history = []
 last_communication = {}  # Track last successful communication per inverter
+
+# Solar forecast globals
+solar_forecast = []  # List of tuples (time, forecasted_generation)
+solar_generation_pattern = deque(maxlen=24)  # Store solar generation for pattern recognition
+calibration_factor = 0.8  # Default efficiency factor for solar panels
+FORECAST_HOURS = 12  # Number of hours to forecast
 
 # East African Timezone
 EAT = timezone(timedelta(hours=3))
@@ -307,6 +315,143 @@ def check_generator_running(backup_inverter_data):
     
     # If there's voltage or power on AC input, generator is running
     return v_ac_input > 100 or p_ac_input > 50
+
+# ----------------------------
+# Solar Forecast Helper Functions
+# ----------------------------
+def analyze_historical_solar_pattern():
+    """Analyze historical solar generation to establish a pattern"""
+    if len(solar_generation_pattern) < 3:
+        return None
+    
+    # Create a baseline pattern (normalized to 0-1)
+    pattern = []
+    for hour_data in solar_generation_pattern:
+        hour = hour_data['hour']
+        generation = hour_data['generation']
+        max_possible = hour_data.get('max_possible', TOTAL_SOLAR_CAPACITY_KW * 1000)
+        
+        if max_possible > 0:
+            normalized = generation / max_possible
+            pattern.append((hour, normalized))
+    
+    if not pattern:
+        return None
+    
+    return pattern
+
+def generate_solar_forecast(solar_conditions, historical_pattern):
+    """Generate solar generation forecast based on weather and historical patterns"""
+    forecast = []
+    now = datetime.now(EAT)
+    
+    if not solar_conditions:
+        return forecast
+    
+    # Get average cloud cover and radiation
+    avg_cloud_cover = solar_conditions.get('avg_cloud_cover', 50)
+    avg_radiation = solar_conditions.get('avg_solar_radiation', 400)
+    
+    # Calculate cloud factor (0-1, where 1 is clear sky)
+    cloud_factor = max(0, 1 - (avg_cloud_cover / 100))
+    
+    # Adjust radiation by cloud factor
+    adjusted_radiation = avg_radiation * cloud_factor
+    
+    # Maximum possible generation (10kW system at 1000W/m²)
+    max_possible_generation = TOTAL_SOLAR_CAPACITY_KW * 1000  # 10000W
+    
+    # Base generation estimate from weather
+    weather_based_generation = min(
+        (adjusted_radiation / 1000) * max_possible_generation * calibration_factor,
+        max_possible_generation
+    )
+    
+    # If we have historical pattern, blend it with weather forecast
+    if historical_pattern:
+        # Generate forecast for next 12 hours
+        for hour_offset in range(FORECAST_HOURS):
+            forecast_time = now + timedelta(hours=hour_offset)
+            hour_of_day = forecast_time.hour
+            
+            # Find historical pattern for this hour
+            pattern_factor = 0.5  # Default if no pattern
+            for pattern_hour, normalized in historical_pattern:
+                if pattern_hour == hour_of_day:
+                    pattern_factor = normalized
+                    break
+            
+            # Blend weather and pattern (70% weather, 30% historical pattern)
+            blend_factor = 0.7
+            estimated_generation = (
+                weather_based_generation * blend_factor + 
+                (pattern_factor * max_possible_generation) * (1 - blend_factor)
+            )
+            
+            # Apply time of day adjustment (no solar at night)
+            if hour_of_day < 6 or hour_of_day >= 18:
+                estimated_generation = estimated_generation * 0.1  # Minimal night generation
+            
+            forecast.append({
+                'time': forecast_time,
+                'hour': hour_of_day,
+                'estimated_generation': max(0, estimated_generation),
+                'weather_based': weather_based_generation,
+                'pattern_based': pattern_factor * max_possible_generation if historical_pattern else 0,
+                'cloud_factor': cloud_factor
+            })
+    else:
+        # Simple forecast based only on weather
+        for hour_offset in range(FORECAST_HOURS):
+            forecast_time = now + timedelta(hours=hour_offset)
+            hour_of_day = forecast_time.hour
+            
+            estimated_generation = weather_based_generation
+            
+            # Apply time of day adjustment
+            if hour_of_day < 6 or hour_of_day >= 18:
+                estimated_generation = estimated_generation * 0.1
+            
+            forecast.append({
+                'time': forecast_time,
+                'hour': hour_of_day,
+                'estimated_generation': max(0, estimated_generation),
+                'weather_based': weather_based_generation,
+                'pattern_based': 0,
+                'cloud_factor': cloud_factor
+            })
+    
+    return forecast
+
+def update_solar_pattern(current_generation, solar_input):
+    """Update historical solar pattern with current data"""
+    now = datetime.now(EAT)
+    hour = now.hour
+    
+    # Calculate current generation percentage of capacity
+    current_capacity_pct = 0
+    if TOTAL_SOLAR_CAPACITY_KW * 1000 > 0:
+        current_capacity_pct = min(current_generation / (TOTAL_SOLAR_CAPACITY_KW * 1000), 1.0)
+    
+    # Update pattern
+    solar_generation_pattern.append({
+        'timestamp': now,
+        'hour': hour,
+        'generation': current_generation,
+        'solar_input': solar_input,
+        'capacity_pct': current_capacity_pct,
+        'max_possible': TOTAL_SOLAR_CAPACITY_KW * 1000
+    })
+    
+    # Update calibration factor based on actual vs expected
+    if solar_input > 100 and current_generation > 100:  # Only during productive hours
+        expected = (solar_input / 1000) * TOTAL_SOLAR_CAPACITY_KW * 1000
+        if expected > 0:
+            new_calibration = current_generation / expected
+            # Smooth update (weighted average)
+            global calibration_factor
+            calibration_factor = calibration_factor * 0.9 + new_calibration * 0.1
+            calibration_factor = min(max(calibration_factor, 0.5), 1.0)  # Keep between 0.5-1.0
 
 # ----------------------------
 # Email function with alert history tracking
@@ -643,7 +788,7 @@ def check_and_send_alerts(inverter_data, solar_conditions, total_solar_input, to
 # Growatt Polling Loop
 # ----------------------------
 def poll_growatt():
-    global latest_data, load_history, battery_history, weather_forecast, last_communication, solar_conditions_cache
+    global latest_data, load_history, battery_history, weather_forecast, last_communication, solar_conditions_cache, solar_forecast
     
     # Fetch weather immediately on startup
     print("🌤️ Fetching initial weather forecast...")
@@ -778,6 +923,18 @@ def poll_growatt():
             # Sort inverters by display order
             inverter_data.sort(key=lambda x: x.get('DisplayOrder', 99))
             
+            # Update solar pattern and generate forecast
+            update_solar_pattern(total_solar_input_W, total_solar_input_W)
+            
+            # Analyze historical pattern
+            historical_pattern = analyze_historical_solar_pattern()
+            
+            # Generate solar forecast
+            solar_forecast.clear()
+            if solar_conditions_cache:
+                forecast_data = generate_solar_forecast(solar_conditions_cache, historical_pattern)
+                solar_forecast.extend(forecast_data)
+            
             # Calculate system metrics
             primary_battery_min = min(primary_capacities) if primary_capacities else 0
             backup_battery_voltage = backup_data['vBat'] if backup_data else 0
@@ -796,7 +953,9 @@ def poll_growatt():
                 "backup_voltage_color": backup_voltage_color,
                 "backup_active": backup_active,
                 "generator_running": generator_running,
-                "inverters": inverter_data
+                "inverters": inverter_data,
+                "solar_forecast": solar_forecast,
+                "historical_pattern_count": len(solar_generation_pattern)
             }
             
             # Append to history
@@ -840,6 +999,23 @@ def home():
     times = [t.strftime('%H:%M') for t, p in load_history]
     load_values = [p for t, p in load_history]
     battery_values = [p for t, p in battery_history]
+    
+    # Solar forecast chart data
+    solar_forecast_data = latest_data.get("solar_forecast", [])
+    historical_pattern_count = latest_data.get("historical_pattern_count", 0)
+    
+    # Prepare forecast chart data
+    forecast_times = []
+    forecast_values = []
+    forecast_weather_based = []
+    forecast_pattern_based = []
+    
+    if solar_forecast_data and historical_pattern_count >= 3:
+        for forecast in solar_forecast_data:
+            forecast_times.append(forecast['time'].strftime('%H:%M'))
+            forecast_values.append(forecast['estimated_generation'])
+            forecast_weather_based.append(forecast['weather_based'])
+            forecast_pattern_based.append(forecast['pattern_based'])
     
     # Use cached solar conditions (calculated in polling loop)
     solar_conditions = solar_conditions_cache
@@ -1455,7 +1631,118 @@ def home():
                 });
             </script>
         </div>
-        
+"""
+    
+    # Solar Forecast Chart - Only show if we have enough historical data
+    if solar_forecast_data and historical_pattern_count >= 3:
+        html += f'''
+        <div class="card">
+            <div class="chart-container">
+                <h2>🌤️ Solar Generation Forecast - Next {FORECAST_HOURS} Hours</h2>
+                <p style="color: #666; margin-bottom: 15px; font-size: 0.95em;">
+                    <strong>Forecast Methodology:</strong> 
+                    {'Blended forecast (70% weather, 30% historical pattern) | Historical data: ' + str(historical_pattern_count) + ' points' if historical_pattern_count >= 10 else 
+                     'Weather-based forecast (learning historical patterns)'}
+                    {f' | Cloud Factor: {solar_forecast_data[0]["cloud_factor"]*100:.0f}%' if solar_forecast_data else ''}
+                </p>
+                <canvas id="solarForecastChart"></canvas>
+            </div>
+            
+            <script>
+                const forecastCtx = document.getElementById('solarForecastChart').getContext('2d');
+                new Chart(forecastCtx, {{
+                    type: 'line',
+                    data: {{
+                        labels: {forecast_times},
+                        datasets: [
+                            {{
+                                label: 'Estimated Generation (W)',
+                                data: {forecast_values},
+                                borderColor: 'rgb(255, 193, 7)',
+                                backgroundColor: 'rgba(255, 193, 7, 0.1)',
+                                borderWidth: 3,
+                                tension: 0.4,
+                                fill: true
+                            }},
+                            {{
+                                label: 'Weather-Based Estimate',
+                                data: {forecast_weather_based},
+                                borderColor: 'rgba(102, 126, 234, 0.5)',
+                                borderWidth: 2,
+                                borderDash: [5, 5],
+                                fill: false,
+                                hidden: true
+                            }},
+                            {{
+                                label: 'Historical Pattern',
+                                data: {forecast_pattern_based},
+                                borderColor: 'rgba(76, 175, 80, 0.5)',
+                                borderWidth: 2,
+                                borderDash: [5, 5],
+                                fill: false,
+                                hidden: true
+                            }}
+                        ]
+                    }},
+                    options: {{
+                        responsive: true,
+                        interaction: {{
+                            mode: 'index',
+                            intersect: false
+                        }},
+                        scales: {{
+                            y: {{
+                                type: 'linear',
+                                display: true,
+                                title: {{
+                                    display: true,
+                                    text: 'Solar Generation (W)',
+                                    font: {{ size: 14, weight: 'bold' }}
+                                }},
+                                suggestedMin: 0,
+                                suggestedMax: {TOTAL_SOLAR_CAPACITY_KW * 1000}
+                            }}
+                        }},
+                        plugins: {{
+                            legend: {{
+                                display: true,
+                                position: 'top'
+                            }},
+                            tooltip: {{
+                                callbacks: {{
+                                    label: function(context) {{
+                                        let label = context.dataset.label || '';
+                                        if (label) {{
+                                            label += ': ';
+                                        }}
+                                        label += Math.round(context.parsed.y) + 'W';
+                                        return label;
+                                    }}
+                                }}
+                            }}
+                        }}
+                    }}
+                }});
+            </script>
+        </div>
+        '''
+    else:
+        html += f'''
+        <div class="card">
+            <div class="chart-container">
+                <h2>🌤️ Solar Generation Forecast</h2>
+                <div style="text-align: center; padding: 40px 20px; color: #666;">
+                    <p style="margin-bottom: 15px;">⏳ Collecting historical solar data...</p>
+                    <p>Forecast chart will appear when system has collected at least 3 hours of solar generation data.</p>
+                    <p style="font-size: 0.9em; opacity: 0.7; margin-top: 20px;">
+                        Current data points: {historical_pattern_count}/3 needed
+                    </p>
+                </div>
+            </div>
+        </div>
+        '''
+    
+    html += """
         <div class="footer">
             10kW Solar System • Cascade Battery Architecture • Solar-Aware Monitoring • Managed by YourHost
         </div>
