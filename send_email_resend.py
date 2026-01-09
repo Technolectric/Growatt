@@ -33,6 +33,11 @@ BACKUP_VOLTAGE_THRESHOLD = 51.2  # When generator starts
 BACKUP_CAPACITY_WARNING = 30  # Warn when backup battery is getting low
 TOTAL_SOLAR_CAPACITY_KW = 10
 
+# Tiered Load Alert System
+# TIER 1: Moderate (1000-1500W) + Low Battery - 60 min cooldown - INFO
+# TIER 2: High (1500-2500W) - 30 min cooldown - WARNING
+# TIER 3: Very High (>2500W) - 15 min cooldown - URGENT
+
 # ----------------------------
 # Location Config (Kajiado, Kenya)
 # ----------------------------
@@ -156,11 +161,23 @@ def send_email(subject, html_content, alert_type="general"):
         return False
     
     # Rate limit: different cooldowns for different alert types
-    cooldown_minutes = 60 if alert_type != "critical" else 30  # Critical alerts can send more frequently
+    # Tiered cooldown system - more urgent alerts can send more frequently
+    cooldown_map = {
+        "critical": 30,           # Generator starting - every 30 min
+        "very_high_load": 15,     # >2500W - every 15 min (most frequent)
+        "backup_active": 60,      # Backup supplying power - every 60 min
+        "high_load": 30,          # 1500-2500W - every 30 min
+        "moderate_load": 60,      # 1000-1500W with low battery - every 60 min
+        "warning": 60,            # Primary battery warning - every 60 min
+        "test": 0,                # Test alerts - no cooldown
+        "general": 60             # Default - every 60 min
+    }
     
-    if alert_type in last_alert_time:
+    cooldown_minutes = cooldown_map.get(alert_type, 60)
+    
+    if alert_type in last_alert_time and cooldown_minutes > 0:
         if datetime.now(EAT) - last_alert_time[alert_type] < timedelta(minutes=cooldown_minutes):
-            print(f"⚠️ Alert cooldown active for {alert_type}, skipping email")
+            print(f"⚠️ Alert cooldown active for {alert_type}, skipping email ({cooldown_minutes} min cooldown)")
             return False
     
     email_data = {
@@ -241,8 +258,14 @@ def check_and_send_alerts(inverter_data, solar_conditions):
                 </ul>
                 
                 <p><strong>⚠️ ACTION REQUIRED:</strong></p>
-                <p>The backup battery voltage has dropped below 51.2V. The generator should be starting automatically. 
-                <strong>Reduce all non-essential loads immediately.</strong></p>
+                <p>The backup battery voltage has dropped below 51.2V. The generator should be starting automatically.</p>
+                <p><strong>REDUCE LOADS NOW:</strong></p>
+                <ol>
+                    <li>Turn OFF all Ovens</li>
+                    <li>Turn OFF water heater (if used)</li>
+                    <li>Unplug non-essential devices</li>
+                    <li>Use only critical loads (lights, fridge)</li>
+                </ol>
                 
                 {f'<p style="color: #dc3545;"><strong>Weather Alert:</strong> Poor solar conditions expected (Cloud: {solar_conditions["avg_cloud_cover"]:.0f}%). Generator may run for extended period.</p>' if solar_conditions and solar_conditions['poor_conditions'] else ''}
             </div>
@@ -278,6 +301,14 @@ def check_and_send_alerts(inverter_data, solar_conditions):
                 <p>Primary inverter batteries are below 40%. Backup inverter is now supplying power to the primary inverters. 
                 If backup voltage drops below 51.2V, the generator will start automatically.</p>
                 
+                <p><strong>Action Required:</strong></p>
+                <ul>
+                    <li>Turn OFF Oven immediately</li>
+                    <li>Turn OFF water heater (if used) / Kettle</li>
+                    <li>Minimize all non-essential loads</li>
+                    <li>Use only lighting, fridge, essential devices</li>
+                </ul>
+                
                 {f'<p style="color: #dc3545;"><strong>Weather Alert:</strong> Poor solar conditions ahead (Cloud: {solar_conditions["avg_cloud_cover"]:.0f}%). Limited recharge expected. Consider reducing load.</p>' if solar_conditions and solar_conditions['poor_conditions'] else f'<p style="color: #28a745;"><strong>Weather:</strong> Good solar conditions expected (Cloud: {solar_conditions["avg_cloud_cover"]:.0f}%). Batteries should recharge.</p>' if solar_conditions else ''}
             </div>
             """,
@@ -308,26 +339,102 @@ def check_and_send_alerts(inverter_data, solar_conditions):
                 
                 {f'<p style="color: #dc3545;"><strong>Weather Alert:</strong> Poor solar forecast (Cloud: {solar_conditions["avg_cloud_cover"]:.0f}%). Consider reducing non-essential loads now.</p>' if solar_conditions and solar_conditions['poor_conditions'] else f'<p style="color: #28a745;"><strong>Weather:</strong> Good conditions expected. Batteries should recover.</p>' if solar_conditions else ''}
                 
-                <p><strong>Recommendation:</strong> Monitor usage and consider reducing high-power loads (AC, water heater).</p>
+                <p><strong>Recommendation:</strong> Monitor usage and consider reducing high-power loads (Oven, water heater (if used), kettle).</p>
             </div>
             """,
             alert_type="warning"
         )
     
     # ============================================
-    # INFO: High load but good battery levels
+    # TIERED HIGH LOAD ALERTS
     # ============================================
-    elif total_load > 2000:  # High total load
+    
+    # TIER 3: Very High Load (>2500W) - URGENT
+    if total_load >= 2500:
         send_email(
-            subject="ℹ️ INFO: High Power Usage Detected",
+            subject="🚨 URGENT: Very High Power Usage - Immediate Action Required",
             html_content=f"""
-            <div style="font-family: Arial; padding: 20px; background: #e7f3ff; border-left: 5px solid #2196F3;">
-                <h2 style="color: #2196F3;">ℹ️ HIGH POWER USAGE</h2>
+            <div style="font-family: Arial; padding: 20px; background: #fff3cd; border-left: 5px solid #dc3545;">
+                <h2 style="color: #dc3545;">🚨 URGENT: VERY HIGH POWER USAGE</h2>
                 
                 <p><strong>Current Status:</strong></p>
                 <ul>
-                    <li>Total Load: <strong>{total_load:.0f}W</strong></li>
-                    <li>Primary Batteries: {primary_capacity:.0f}% (Good)</li>
+                    <li>Total Load: <strong style="color: #dc3545;">{total_load:.0f}W</strong> (CRITICAL - Above 2500W)</li>
+                    <li>Primary Batteries: {primary_capacity:.0f}%</li>
+                    <li>Backup Battery: {backup_capacity:.0f}% ({backup_voltage:.1f}V)</li>
+                </ul>
+                
+                <p><strong>Individual Loads:</strong></p>
+                <ul>
+                    <li>Inverter 1: {inv1['OutputPower']:.0f}W ({inv1['Capacity']:.0f}%)</li>
+                    <li>Inverter 2: {inv2['OutputPower']:.0f}W ({inv2['Capacity']:.0f}%)</li>
+                    <li>Inverter 3: {inv3_backup['OutputPower']:.0f}W ({inv3_backup['Capacity']:.0f}%)</li>
+                </ul>
+                
+                <p><strong>⚠️ IMMEDIATE ACTION REQUIRED:</strong></p>
+                <p>Power consumption is critically high. This level of usage will rapidly drain batteries.</p>
+                <ul>
+                    <li>Turn OFF Oven immediately</li>
+                    <li>Turn OFF water heater (if used)</li>
+                    <li>Turn OFF kettle</li>
+                    <li>Check for multiple high-power devices running simultaneously</li>
+                    <li>Reduce to essential loads only</li>
+                </ul>
+                
+                {f'<p style="color: #dc3545;"><strong>Weather Alert:</strong> Poor solar conditions expected (Cloud: {solar_conditions["avg_cloud_cover"]:.0f}%). Battery recovery will be limited.</p>' if solar_conditions and solar_conditions['poor_conditions'] else f'<p style="color: #28a745;"><strong>Weather:</strong> Good solar expected (Cloud: {solar_conditions["avg_cloud_cover"]:.0f}%). Batteries should recover if load reduced.</p>' if solar_conditions else ''}
+            </div>
+            """,
+            alert_type="very_high_load"
+        )
+    
+    # TIER 2: High Load (1500-2500W) - WARNING
+    elif 1500 <= total_load < 2500:
+        send_email(
+            subject="⚠️ WARNING: High Power Usage Detected",
+            html_content=f"""
+            <div style="font-family: Arial; padding: 20px; background: #fff9e6; border-left: 5px solid #ff9800;">
+                <h2 style="color: #ff9800;">⚠️ HIGH POWER USAGE</h2>
+                
+                <p><strong>Current Status:</strong></p>
+                <ul>
+                    <li>Total Load: <strong style="color: #ff9800;">{total_load:.0f}W</strong> (High - Above 1500W)</li>
+                    <li>Primary Batteries: {primary_capacity:.0f}%</li>
+                    <li>Backup Battery: {backup_capacity:.0f}% ({backup_voltage:.1f}V)</li>
+                </ul>
+                
+                <p><strong>Individual Loads:</strong></p>
+                <ul>
+                    <li>Inverter 1: {inv1['OutputPower']:.0f}W</li>
+                    <li>Inverter 2: {inv2['OutputPower']:.0f}W</li>
+                    <li>Inverter 3: {inv3_backup['OutputPower']:.0f}W</li>
+                </ul>
+                
+                <p><strong>Recommendation:</strong></p>
+                <p>Power usage is high. Consider reducing load, especially if batteries are not at full capacity.</p>
+                <ul>
+                    <li>Avoid using multiple high-power devices simultaneously</li>
+                    <li>Turn off Oven if cooking is complete</li>
+                    <li>Monitor battery levels</li>
+                </ul>
+                
+                {f'<p style="color: #dc3545;"><strong>Weather Alert:</strong> Poor solar forecast (Cloud: {solar_conditions["avg_cloud_cover"]:.0f}%). Consider reducing usage.</p>' if solar_conditions and solar_conditions['poor_conditions'] else f'<p style="color: #28a745;"><strong>Weather:</strong> Good solar conditions expected. System should handle load.</p>' if solar_conditions else ''}
+            </div>
+            """,
+            alert_type="high_load"
+        )
+    
+    # TIER 1: Moderate Load (1000-1500W) with Low Battery - INFO
+    elif 1000 <= total_load < 1500 and primary_capacity < 50:
+        send_email(
+            subject="ℹ️ INFO: Moderate Load with Low Battery",
+            html_content=f"""
+            <div style="font-family: Arial; padding: 20px; background: #e7f3ff; border-left: 5px solid #2196F3;">
+                <h2 style="color: #2196F3;">ℹ️ MODERATE POWER USAGE - LOW BATTERY</h2>
+                
+                <p><strong>Current Status:</strong></p>
+                <ul>
+                    <li>Total Load: {total_load:.0f}W (Moderate)</li>
+                    <li>Primary Batteries: <strong style="color: #ff9800;">{primary_capacity:.0f}%</strong> (Below 50%)</li>
                     <li>Backup Battery: {backup_capacity:.0f}%</li>
                 </ul>
                 
@@ -338,10 +445,13 @@ def check_and_send_alerts(inverter_data, solar_conditions):
                     <li>Inverter 3: {inv3_backup['OutputPower']:.0f}W</li>
                 </ul>
                 
-                {f'<p style="color: #28a745;"><strong>Weather:</strong> Good solar conditions expected. System should handle load well.</p>' if solar_conditions and not solar_conditions['poor_conditions'] else f'<p style="color: #ff9800;"><strong>Weather:</strong> Poor solar ahead. Consider moderating usage.</p>' if solar_conditions else ''}
+                <p><strong>Advisory:</strong></p>
+                <p>Current power usage is moderate but batteries are below 50%. Consider conserving energy.</p>
+                
+                {f'<p style="color: #ff9800;"><strong>Weather:</strong> Poor solar ahead (Cloud: {solar_conditions["avg_cloud_cover"]:.0f}%). Battery recovery may be slow.</p>' if solar_conditions and solar_conditions['poor_conditions'] else f'<p style="color: #28a745;"><strong>Weather:</strong> Good solar expected. Batteries should recover.</p>' if solar_conditions else ''}
             </div>
             """,
-            alert_type="high_load"
+            alert_type="moderate_load"
         )
 
 # ----------------------------
