@@ -107,7 +107,8 @@ def get_weather_from_weatherapi():
     """Try WeatherAPI.com (Fallback 1 - uses demo key)"""
     try:
         # Using lat,lon format which works without API key for basic forecast
-        url = f"http://api.weatherapi.com/v1/forecast.json?key=demo&q={LATITUDE},{LONGITUDE}&days=2"
+       WEATHERAPI_KEY = os.getenv("WEATHERAPI_KEY")  # put your key in environment variable
+url = f"http://api.weatherapi.com/v1/forecast.json?key={WEATHERAPI_KEY}&q={LATITUDE},{LONGITUDE}&days=2"
         response = requests.get(url, timeout=10)
         
         if response.status_code == 200:
