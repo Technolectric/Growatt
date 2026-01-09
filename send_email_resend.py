@@ -106,9 +106,12 @@ def get_weather_from_openmeteo():
 def get_weather_from_weatherapi():
     """Try WeatherAPI.com (Fallback 1 - uses demo key)"""
     try:
-        # Using lat,lon format which works without API key for basic forecast
-       WEATHERAPI_KEY = os.getenv("WEATHERAPI_KEY")  # put your key in environment variable
-url = f"http://api.weatherapi.com/v1/forecast.json?key={WEATHERAPI_KEY}&q={LATITUDE},{LONGITUDE}&days=2"
+        # Get the key from env
+        WEATHERAPI_KEY = os.getenv("WEATHERAPI_KEY") 
+        
+        # FIXED: This line was shifted to the left, causing the SyntaxError
+        url = f"http://api.weatherapi.com/v1/forecast.json?key={WEATHERAPI_KEY}&q={LATITUDE},{LONGITUDE}&days=2"
+        
         response = requests.get(url, timeout=10)
         
         if response.status_code == 200:
@@ -118,13 +121,14 @@ url = f"http://api.weatherapi.com/v1/forecast.json?key={WEATHERAPI_KEY}&q={LATIT
             cloud_cover = []
             solar_radiation = []
             
+            # Parsing logic for WeatherAPI.com structure
             for day in data.get('forecast', {}).get('forecastday', []):
                 for hour in day.get('hour', []):
                     times.append(hour['time'])
                     cloud_cover.append(hour['cloud'])
-                    # Estimate solar from UV index
+                    # Estimate solar from UV index (UV 1 is roughly 100-150 W/m2)
                     uv = hour.get('uv', 0)
-                    solar_radiation.append(uv * 100)
+                    solar_radiation.append(uv * 120) 
             
             if times:
                 return {
@@ -137,7 +141,7 @@ url = f"http://api.weatherapi.com/v1/forecast.json?key={WEATHERAPI_KEY}&q={LATIT
     except Exception as e:
         print(f"✗ WeatherAPI failed: {e}")
         return None
-
+        
 def get_weather_from_7timer():
     """Try 7Timer.info (Fallback 2 - always free, no key)"""
     try:
