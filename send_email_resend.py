@@ -55,12 +55,6 @@ BACKUP_BATTERY_CAPACITY_WH = 30000   # 30kWh original
 BACKUP_BATTERY_DEGRADED_WH = 21000   # 70% remaining after 5 years (15% degradation per year)
 BACKUP_BATTERY_USABLE_WH = 14700     # 70% of degraded capacity
 
-# Tiered Load Alert System (SOLAR-AWARE - only alerts on battery discharge)
-# TIER 1: Moderate battery discharge (1000-1500W) + Low Battery - 120 min cooldown
-# TIER 2: High battery discharge (1500-2500W) - 60 min cooldown
-# TIER 3: Very High battery discharge (>2500W) - 30 min cooldown
-# Note: Alerts only if power is coming from BATTERY, not if solar is covering load
-
 # ----------------------------
 # Location Config (Kajiado, Kenya)
 # ----------------------------
@@ -92,7 +86,7 @@ last_communication = {}  # Track last successful communication per inverter
 solar_forecast = []  # List of tuples (time, forecasted_generation)
 solar_generation_pattern = deque(maxlen=48)  # Store solar generation for pattern recognition
 load_demand_pattern = deque(maxlen=48)  # Store load demand for pattern recognition
-SOLAR_EFFICIENCY_FACTOR = 0.8  # Fixed efficiency factor for solar panels (accounts for dust, temperature, etc.)
+SOLAR_EFFICIENCY_FACTOR = 0.85  # Fixed efficiency factor for solar panels
 FORECAST_HOURS = 12  # Number of hours to forecast
 
 # East African Timezone
@@ -120,28 +114,22 @@ def get_weather_from_openmeteo():
         return None
 
 def get_weather_from_weatherapi():
-    """Try WeatherAPI.com (Fallback 1 - uses demo key)"""
+    """Try WeatherAPI.com (Fallback 1)"""
     try:
-        # Get the key from env
         WEATHERAPI_KEY = os.getenv("WEATHERAPI_KEY") 
-        
         url = f"http://api.weatherapi.com/v1/forecast.json?key={WEATHERAPI_KEY}&q={LATITUDE},{LONGITUDE}&days=2"
-        
         response = requests.get(url, timeout=10)
         
         if response.status_code == 200:
             data = response.json()
-            
             times = []
             cloud_cover = []
             solar_radiation = []
             
-            # Parsing logic for WeatherAPI.com structure
             for day in data.get('forecast', {}).get('forecastday', []):
                 for hour in day.get('hour', []):
                     times.append(hour['time'])
                     cloud_cover.append(hour['cloud'])
-                    # Estimate solar from UV index (UV 1 is roughly 100-150 W/m2)
                     uv = hour.get('uv', 0)
                     solar_radiation.append(uv * 120) 
             
@@ -158,7 +146,7 @@ def get_weather_from_weatherapi():
         return None
         
 def get_weather_from_7timer():
-    """Try 7Timer.info (Fallback 2 - always free, no key)"""
+    """Try 7Timer.info (Fallback 2)"""
     try:
         url = f"http://www.7timer.info/bin/api.pl?lon={LONGITUDE}&lat={LATITUDE}&product=civil&output=json"
         response = requests.get(url, timeout=15)
@@ -175,13 +163,9 @@ def get_weather_from_7timer():
             hour_offset = item.get('timepoint', 0)
             forecast_time = base_time + timedelta(hours=hour_offset)
             times.append(forecast_time.strftime('%Y-%m-%dT%H:%M'))
-            
-            # Cloud cover: 1-9 scale
             cloud_val = item.get('cloudcover', 5)
             cloud_pct = min((cloud_val * 12), 100)
             cloud_cover.append(cloud_pct)
-            
-            # Estimate solar
             solar_est = max(800 * (1 - cloud_pct/100), 0)
             solar_radiation.append(solar_est)
         
@@ -197,13 +181,32 @@ def get_weather_from_7timer():
         print(f"✗ 7Timer failed: {e}")
         return None
 
+def get_fallback_weather():
+    """Synthetic Clear Sky Weather if Internet Fails"""
+    print("⚠️ Using Synthetic Fallback Weather (Internet issue likely)")
+    times, clouds, rads = [], [], []
+    now = datetime.now(EAT).replace(minute=0, second=0, microsecond=0)
+    
+    for i in range(48):
+        t = now + timedelta(hours=i)
+        times.append(t.isoformat())
+        clouds.append(20) # Assume 20% clouds
+        
+        # Simple triangle wave for radiation
+        h = t.hour
+        if 6 <= h <= 18:
+            dist = abs(12 - h)
+            rads.append(max(0, 1000 - (dist * 150)))
+        else:
+            rads.append(0)
+            
+    return {'times': times, 'cloud_cover': clouds, 'solar_radiation': rads, 'source': 'Synthetic (Offline)'}
+
 def get_weather_forecast():
     """Try multiple weather sources with fallback"""
     global weather_source
-    
     print("🌤️ Fetching weather forecast...")
     
-    # Try sources in order
     sources = [
         ("Open-Meteo", get_weather_from_openmeteo),
         ("WeatherAPI", get_weather_from_weatherapi),
@@ -215,351 +218,196 @@ def get_weather_forecast():
         forecast = fetch_func()
         if forecast and len(forecast.get('times', [])) > 0:
             weather_source = forecast['source']
-            print(f"✓ Weather forecast from {weather_source}: {len(forecast['times'])} hours")
+            print(f"✓ Weather forecast from {weather_source}")
             return forecast
     
-    print("✗ All weather sources failed")
-    weather_source = "All sources failed"
-    return None
+    print("✗ All weather sources failed, using fallback")
+    weather_source = "Synthetic (Offline)"
+    return get_fallback_weather()
 
 def analyze_solar_conditions(forecast):
-    """Analyze upcoming solar conditions - smart daytime-only analysis"""
-    if not forecast:
-        print("⚠️ analyze_solar_conditions: No forecast data")
-        return None
-    
+    """Analyze upcoming solar conditions"""
+    if not forecast: return None
     try:
         now = datetime.now(EAT)
         current_hour = now.hour
-        
         is_nighttime = current_hour < 6 or current_hour >= 18
         
-        if is_nighttime:
-            tomorrow = now + timedelta(days=1)
-            start_time = tomorrow.replace(hour=6, minute=0, second=0, microsecond=0)
-            end_time = tomorrow.replace(hour=18, minute=0, second=0, microsecond=0)
-            analysis_label = "Tomorrow's Daylight"
-        else:
-            start_time = now
-            end_time = now.replace(hour=18, minute=0, second=0, microsecond=0)
-            analysis_label = "Today's Remaining Daylight"
-        
-        avg_cloud_cover = 0
-        avg_solar_radiation = 0
-        count = 0
+        avg_cloud_cover, avg_solar_radiation, count = 0, 0, 0
         
         for i, time_str in enumerate(forecast['times']):
             try:
-                # Handle multiple time formats from different weather sources
-                if 'T' in time_str:
-                    # ISO format: 2026-01-09T21:00 or 2026-01-09T21:00:00Z
-                    forecast_time = datetime.fromisoformat(time_str.replace('Z', ''))
-                else:
-                    # Other formats
-                    forecast_time = datetime.strptime(time_str, '%Y-%m-%d %H:%M')
+                if 'T' in time_str: forecast_time = datetime.fromisoformat(time_str.replace('Z', ''))
+                else: forecast_time = datetime.strptime(time_str, '%Y-%m-%d %H:%M')
                 
-                # Ensure timezone aware
-                if forecast_time.tzinfo is None:
-                    forecast_time = forecast_time.replace(tzinfo=EAT)
-                else:
-                    forecast_time = forecast_time.astimezone(EAT)
+                if forecast_time.tzinfo is None: forecast_time = forecast_time.replace(tzinfo=EAT)
+                else: forecast_time = forecast_time.astimezone(EAT)
                 
-                if start_time <= forecast_time <= end_time:
-                    hour = forecast_time.hour
-                    if 6 <= hour <= 18:
-                        avg_cloud_cover += forecast['cloud_cover'][i]
-                        avg_solar_radiation += forecast['solar_radiation'][i]
-                        count += 1
-            except Exception as parse_error:
-                # Skip this time entry if parsing fails
-                continue
+                # Check for FUTURE daylight hours
+                if forecast_time > now and 6 <= forecast_time.hour <= 18:
+                    avg_cloud_cover += forecast['cloud_cover'][i]
+                    avg_solar_radiation += forecast['solar_radiation'][i]
+                    count += 1
+                    if count >= 12: break 
+            except: continue
         
         if count > 0:
             avg_cloud_cover /= count
             avg_solar_radiation /= count
-            
-            poor_conditions = avg_cloud_cover > 70 or avg_solar_radiation < 200
-            
-            print(f"✓ Solar analysis: {count} hours analyzed, Cloud: {avg_cloud_cover:.0f}%, Solar: {avg_solar_radiation:.0f}W/m²")
-            
             return {
                 'avg_cloud_cover': avg_cloud_cover,
                 'avg_solar_radiation': avg_solar_radiation,
-                'poor_conditions': poor_conditions,
-                'hours_analyzed': count,
-                'analysis_period': analysis_label,
+                'poor_conditions': avg_cloud_cover > 70 or avg_solar_radiation < 200,
                 'is_nighttime': is_nighttime
             }
-        else:
-            print(f"⚠️ Solar analysis: No valid hours found in forecast window")
     except Exception as e:
         print(f"✗ Error analyzing solar conditions: {e}")
-        import traceback
-        traceback.print_exc()
-    
     return None
 
 # ----------------------------
 # Helper Functions
 # ----------------------------
 def get_backup_voltage_status(voltage):
-    """Get backup battery status based on voltage"""
-    if voltage >= BACKUP_VOLTAGE_GOOD:
-        return "Good", "green"
-    elif voltage >= BACKUP_VOLTAGE_MEDIUM:
-        return "Medium", "orange"
-    else:
-        return "Low", "red"
+    if voltage >= BACKUP_VOLTAGE_GOOD: return "Good", "green"
+    elif voltage >= BACKUP_VOLTAGE_MEDIUM: return "Medium", "orange"
+    else: return "Low", "red"
 
 def check_generator_running(backup_inverter_data):
-    """Check if generator is running based on input voltage"""
-    if not backup_inverter_data:
-        return False
-    
-    # Generator is running if there's AC input to the backup inverter
+    if not backup_inverter_data: return False
     v_ac_input = float(backup_inverter_data.get('vac', 0) or 0)
     p_ac_input = float(backup_inverter_data.get('pAcInPut', 0) or 0)
-    
-    # If there's voltage or power on AC input, generator is running
     return v_ac_input > 100 or p_ac_input > 50
 
 # ----------------------------
 # Solar Forecast Helper Functions
 # ----------------------------
 def analyze_historical_solar_pattern():
-    """Analyze historical solar generation to establish a pattern"""
-    if len(solar_generation_pattern) < 3:
-        return None
-    
-    # Create a baseline pattern (normalized to 0-1)
+    if len(solar_generation_pattern) < 3: return None
     pattern = []
-    for hour_data in solar_generation_pattern:
-        hour = hour_data['hour']
-        generation = hour_data['generation']
-        max_possible = hour_data.get('max_possible', TOTAL_SOLAR_CAPACITY_KW * 1000)
+    hour_map = {}
+    for data in solar_generation_pattern:
+        h = data['hour']
+        if h not in hour_map: hour_map[h] = []
+        hour_map[h].append(data['generation'] / data['max_possible'])
         
-        if max_possible > 0:
-            normalized = generation / max_possible
-            pattern.append((hour, normalized))
-    
-    if not pattern:
-        return None
-    
+    for h, vals in hour_map.items():
+        pattern.append((h, np.mean(vals)))
     return pattern
 
 def analyze_historical_load_pattern():
-    """Analyze historical load demand to establish a pattern"""
-    if len(load_demand_pattern) < 3:
-        return None
-    
-    # Create a baseline pattern
+    if len(load_demand_pattern) < 3: return None
     pattern = []
-    for hour_data in load_demand_pattern:
-        hour = hour_data['hour']
-        load = hour_data['load']
-        # Normalize to 0-1 based on system capacity
-        max_possible = PRIMARY_INVERTER_CAPACITY_W + BACKUP_INVERTER_CAPACITY_W
-        if max_possible > 0:
-            normalized = load / max_possible
-            pattern.append((hour, normalized, load))
-    
-    if not pattern:
-        return None
-    
+    hour_map = {}
+    for data in load_demand_pattern:
+        h = data['hour']
+        if h not in hour_map: hour_map[h] = []
+        hour_map[h].append(data['load'])
+        
+    for h, vals in hour_map.items():
+        pattern.append((h, 0, np.mean(vals)))
     return pattern
 
-def get_hourly_weather_forecast(weather_data, num_hours=12):
-    """Extract hourly weather data for the next N hours"""
-    hourly_forecast = []
-    now = datetime.now(EAT)
-    
-    if not weather_data:
-        return hourly_forecast
-    
-    # Parse time strings to datetime objects
-    weather_times = []
-    for i, time_str in enumerate(weather_data['times']):
-        try:
-            if 'T' in time_str:
-                # ISO format: 2026-01-09T21:00 or 2026-01-09T21:00:00Z
-                forecast_time = datetime.fromisoformat(time_str.replace('Z', ''))
-            else:
-                # Other formats
-                forecast_time = datetime.strptime(time_str, '%Y-%m-%d %H:%M')
-            
-            # Ensure timezone aware
-            if forecast_time.tzinfo is None:
-                forecast_time = forecast_time.replace(tzinfo=EAT)
-            else:
-                forecast_time = forecast_time.astimezone(EAT)
-            
-            weather_times.append({
-                'time': forecast_time,
-                'cloud_cover': weather_data['cloud_cover'][i] if i < len(weather_data['cloud_cover']) else 50,
-                'solar_radiation': weather_data['solar_radiation'][i] if i < len(weather_data['solar_radiation']) else 0
-            })
-        except Exception as e:
-            continue
-    
-    if not weather_times:
-        return hourly_forecast
-    
-    # Sort by time
-    weather_times.sort(key=lambda x: x['time'])
-    
-    # Get forecast for next N hours
-    for hour_offset in range(num_hours):
-        forecast_time = now + timedelta(hours=hour_offset)
-        
-        # Find closest weather data point
-        closest = min(weather_times, key=lambda x: abs(x['time'] - forecast_time))
-        
-        hourly_forecast.append({
-            'time': forecast_time,
-            'hour': forecast_time.hour,
-            'cloud_cover': closest['cloud_cover'],
-            'solar_radiation': closest['solar_radiation']
-        })
-    
-    return hourly_forecast
-
 def apply_solar_curve(generation, hour_of_day):
-    """Apply solar curve - STRICTLY 0 at night, bell curve during day"""
-    # Kajiado, Kenya (Equatorial) - Civil Twilight ~06:00 to ~19:00
+    """STRICT Solar Curve: 0W at night, Sin^2 during day"""
     if hour_of_day < 6 or hour_of_day >= 19:
         return 0.0
     
-    # Convert hour to position in solar day (0.0 at 6:00, 1.0 at 19:00)
-    solar_day_length = 13.0
-    solar_hour = (hour_of_day - 6) / solar_day_length
-    
-    # Apply bell curve (sin^2 function provides a more natural solar ramp than cosine)
+    solar_hour = (hour_of_day - 6) / 13.0
     curve_factor = np.sin(solar_hour * np.pi) ** 2
     
-    # Adjust for atmospheric mass (morning/evening is weaker)
     if hour_of_day <= 7 or hour_of_day >= 18:
         curve_factor *= 0.7
-    
+        
     return generation * curve_factor
 
 def generate_solar_forecast(weather_forecast_data, historical_pattern):
-    """Generate solar generation forecast with strict night-time zeroing"""
+    """Generate solar generation forecast with robust night handling"""
     forecast = []
+    now = datetime.now(EAT)
+    max_possible = TOTAL_SOLAR_CAPACITY_KW * 1000
     
-    if not weather_forecast_data:
-        return forecast
-    
-    # Get hourly weather forecast for next 12 hours
-    hourly_weather = get_hourly_weather_forecast(weather_forecast_data, FORECAST_HOURS)
-    
-    if not hourly_weather:
-        return forecast
-    
-    # Maximum possible generation (10kW system at 1000W/m²)
-    max_possible_generation = TOTAL_SOLAR_CAPACITY_KW * 1000  # 10000W
-    
-    for hour_data in hourly_weather:
-        forecast_time = hour_data['time']
-        hour_of_day = hour_data['hour']
+    # 1. Parse Weather Data into a lookup dictionary
+    weather_lookup = {}
+    if weather_forecast_data:
+        for i, t_str in enumerate(weather_forecast_data['times']):
+            try:
+                if 'T' in t_str: dt = datetime.fromisoformat(t_str.replace('Z', ''))
+                else: dt = datetime.strptime(t_str, '%Y-%m-%d %H:%M')
+                
+                if dt.tzinfo is None: dt = dt.replace(tzinfo=EAT)
+                else: dt = dt.astimezone(EAT)
+                
+                # Key by day and hour for easy lookup
+                key = (dt.day, dt.hour)
+                weather_lookup[key] = {
+                    'cloud_cover': weather_forecast_data['cloud_cover'][i],
+                    'solar_radiation': weather_forecast_data['solar_radiation'][i]
+                }
+            except: continue
+
+    # 2. Iterate strictly over the next FORECAST_HOURS
+    for i in range(FORECAST_HOURS):
+        forecast_time = now + timedelta(hours=i)
+        hour = forecast_time.hour
+        day = forecast_time.day
         
-        # --- FIXED LOGIC: Hard Night Cutoff ---
-        # If it is night, force 0 regardless of weather API (which might give residual values)
-        if hour_of_day < 6 or hour_of_day >= 19:
+        # Default values (if no weather data found)
+        cloud_cover = 50
+        theoretical_generation = 0
+        
+        # Look up weather
+        w_data = weather_lookup.get((day, hour))
+        if w_data:
+            cloud_cover = w_data['cloud_cover']
+            theoretical_generation = (w_data['solar_radiation'] / 1000) * max_possible * SOLAR_EFFICIENCY_FACTOR
+        
+        # --- FIXED: STRICT 0 AT NIGHT ---
+        if hour < 6 or hour >= 19:
             blended_generation = 0.0
             theoretical_generation = 0.0
-            cloud_factor = 0.0
-            cloud_cover = 100
-            solar_radiation = 0
         else:
-            # Daytime logic
-            cloud_cover = hour_data['cloud_cover']
-            solar_radiation = hour_data['solar_radiation']
+            curve_adjusted = apply_solar_curve(theoretical_generation, hour)
+            blended_generation = curve_adjusted
             
-            # Calculate cloud factor (0-1, where 1 is clear sky) - Weighted non-linear
-            cloud_factor = max(0.1, (1 - (cloud_cover / 100)) ** 1.5)
-            
-            # Base generation estimate from weather (theoretical maximum at this radiation level)
-            theoretical_generation = (solar_radiation / 1000) * max_possible_generation * SOLAR_EFFICIENCY_FACTOR
-            
-            # Apply solar curve (bell curve throughout the day)
-            curve_adjusted_generation = apply_solar_curve(theoretical_generation, hour_of_day)
-            
-            # If we have historical pattern, blend it
+            # Blend History if available
             if historical_pattern:
-                # Find historical pattern for this hour
-                pattern_factor = 0.0
-                for pattern_hour, normalized in historical_pattern:
-                    if pattern_hour == hour_of_day:
-                        pattern_factor = normalized
+                pat_factor = 0
+                for ph, norm in historical_pattern:
+                    if ph == hour:
+                        pat_factor = norm
                         break
-                
-                # Blend weather-based and historical pattern (60/40 split)
-                blended_generation = (
-                    curve_adjusted_generation * 0.6 + 
-                    (pattern_factor * max_possible_generation) * 0.4
-                )
-            else:
-                blended_generation = curve_adjusted_generation
+                blended_generation = (curve_adjusted * 0.6 + (pat_factor * max_possible) * 0.4)
         
         forecast.append({
             'time': forecast_time,
-            'hour': hour_of_day,
+            'hour': hour,
             'estimated_generation': max(0, blended_generation),
             'theoretical_max': theoretical_generation,
-            'cloud_cover': cloud_cover,
-            'solar_radiation': solar_radiation,
-            'cloud_factor': cloud_factor
+            'cloud_cover': cloud_cover
         })
     
     return forecast
 
 def generate_load_forecast(historical_pattern):
-    """Generate load demand forecast based on historical patterns"""
     forecast = []
     now = datetime.now(EAT)
-    
-    if not historical_pattern:
-        # Default pattern based on your actual load data
-        for hour_offset in range(FORECAST_HOURS):
-            forecast_time = now + timedelta(hours=hour_offset)
-            hour_of_day = forecast_time.hour
-            
-            # Your actual load pattern from data
-            if 6 <= hour_of_day <= 9:  # Morning peak
-                load = 2500  # 2.5kW morning load
-            elif 18 <= hour_of_day <= 22:  # Evening peak
-                load = 2800  # 2.8kW evening load
-            elif hour_of_day < 6 or hour_of_day >= 23:  # Night low
-                load = 800   # 0.8kW overnight
-            else:  # Daytime normal
-                load = 1500  # 1.5kW daytime
-            
-            forecast.append({
-                'time': forecast_time,
-                'hour': hour_of_day,
-                'estimated_load': load
-            })
-    else:
-        # Use historical pattern
-        for hour_offset in range(FORECAST_HOURS):
-            forecast_time = now + timedelta(hours=hour_offset)
-            hour_of_day = forecast_time.hour
-            
-            # Find historical pattern for this hour
-            pattern_load = 1500  # Default 1.5kW
-            for pattern_hour, normalized, actual_load in historical_pattern:
-                if pattern_hour == hour_of_day:
-                    pattern_load = actual_load
-                    break
-            
-            forecast.append({
-                'time': forecast_time,
-                'hour': hour_of_day,
-                'estimated_load': pattern_load
-            })
-    
+    for hour_offset in range(FORECAST_HOURS):
+        forecast_time = now + timedelta(hours=hour_offset)
+        hour = forecast_time.hour
+        
+        load = 1500
+        if historical_pattern:
+            for ph, _, al in historical_pattern:
+                if ph == hour: load = al; break
+        else:
+            if 18 <= hour <= 22: load = 2800
+            elif hour < 6: load = 800
+        forecast.append({'time': forecast_time, 'hour': hour, 'estimated_load': load})
     return forecast
 
+# ----------------------------
+# UPDATED: Cascade Battery Simulation
+# ----------------------------
 def calculate_battery_cascade(solar_forecast_data, load_forecast_data, current_primary_percent, backup_active=False):
     """
     Simulates: Primary Battery -> Backup Battery -> Generator Needed
@@ -567,17 +415,16 @@ def calculate_battery_cascade(solar_forecast_data, load_forecast_data, current_p
     if not solar_forecast_data or not load_forecast_data:
         return None
     
-    # Calculate starting energy
     current_primary_wh = (current_primary_percent / 100) * PRIMARY_BATTERY_USABLE_WH
-    current_backup_wh = BACKUP_BATTERY_USABLE_WH * 0.8 # Assume 80% if not tracked explicitly
+    current_backup_wh = BACKUP_BATTERY_USABLE_WH * 0.8
     
-    # Traces for Charting
-    trace_primary_kwh = [current_primary_wh / 1000]
-    trace_backup_kwh = [current_backup_wh / 1000]
-    trace_genset_needed_kwh = [0]
-    trace_deficit_watts = [0]
+    # Traces
+    trace_primary = [current_primary_wh / 1000]
+    trace_backup = [current_backup_wh / 1000]
+    trace_genset = [0]
+    trace_deficit = [0]
     
-    accumulated_genset_wh = 0
+    acc_genset = 0
     
     limit = min(len(solar_forecast_data), len(load_forecast_data))
     
@@ -585,17 +432,14 @@ def calculate_battery_cascade(solar_forecast_data, load_forecast_data, current_p
         solar = solar_forecast_data[i]['estimated_generation']
         load = load_forecast_data[i]['estimated_load']
         
-        # Net Power Deficit (Instantaneous Watts)
+        # Net Power Deficit
         net_watts = load - solar
-        trace_deficit_watts.append(max(0, net_watts))
+        trace_deficit.append(max(0, net_watts))
         
-        # Energy calculation (Wh for this hour)
-        energy_step_wh = net_watts * 1.0 
+        energy_step_wh = net_watts * 1.0 # 1 hour step
         
         if energy_step_wh > 0:
-            # We have a deficit, need to pull from storage
-            
-            # 1. Pull from Primary
+            # Drain Primary
             if current_primary_wh >= energy_step_wh:
                 current_primary_wh -= energy_step_wh
                 energy_step_wh = 0
@@ -603,7 +447,7 @@ def calculate_battery_cascade(solar_forecast_data, load_forecast_data, current_p
                 energy_step_wh -= current_primary_wh
                 current_primary_wh = 0
                 
-            # 2. Pull from Backup (if Primary empty)
+            # Drain Backup
             if energy_step_wh > 0:
                 if current_backup_wh >= energy_step_wh:
                     current_backup_wh -= energy_step_wh
@@ -612,77 +456,49 @@ def calculate_battery_cascade(solar_forecast_data, load_forecast_data, current_p
                     energy_step_wh -= current_backup_wh
                     current_backup_wh = 0
             
-            # 3. Generator Needed (if both empty)
+            # Generator Needed
             if energy_step_wh > 0:
-                accumulated_genset_wh += energy_step_wh
-                
+                acc_genset += energy_step_wh
         else:
-            # We have a surplus, charge batteries
-            surplus_wh = abs(energy_step_wh)
-            
-            # Charge Primary first
-            space_in_primary = PRIMARY_BATTERY_USABLE_WH - current_primary_wh
-            if surplus_wh <= space_in_primary:
-                current_primary_wh += surplus_wh
-                surplus_wh = 0
+            # Charge
+            surplus = abs(energy_step_wh)
+            space_p = PRIMARY_BATTERY_USABLE_WH - current_primary_wh
+            if surplus <= space_p:
+                current_primary_wh += surplus
+                surplus = 0
             else:
                 current_primary_wh = PRIMARY_BATTERY_USABLE_WH
-                surplus_wh -= space_in_primary
-                
-            # Charge Backup second (if primary full)
-            current_backup_wh = min(current_backup_wh + surplus_wh, BACKUP_BATTERY_USABLE_WH)
+                surplus -= space_p
+            
+            current_backup_wh = min(current_backup_wh + surplus, BACKUP_BATTERY_USABLE_WH)
 
-        trace_primary_kwh.append(current_primary_wh / 1000)
-        trace_backup_kwh.append(current_backup_wh / 1000)
-        trace_genset_needed_kwh.append(accumulated_genset_wh / 1000)
+        trace_primary.append(current_primary_wh / 1000)
+        trace_backup.append(current_backup_wh / 1000)
+        trace_genset.append(acc_genset / 1000)
     
     return {
-        'primary_trace': trace_primary_kwh,
-        'backup_trace': trace_backup_kwh,
-        'genset_trace': trace_genset_needed_kwh,
-        'deficit_trace': trace_deficit_watts,
-        'will_need_genset': accumulated_genset_wh > 0,
-        'genset_kwh_needed': accumulated_genset_wh / 1000
+        'primary_trace': trace_primary,
+        'backup_trace': trace_backup,
+        'genset_trace': trace_genset,
+        'deficit_trace': trace_deficit,
+        'will_need_generator': acc_genset > 0
     }
 
 def update_solar_pattern(current_generation):
-    """Update historical solar pattern with current data - FIX: Ignore night noise"""
     now = datetime.now(EAT)
-    hour = now.hour
+    h = now.hour
     
-    # --- FIXED LOGIC: Clean Data Recording ---
-    # Inverters often report 10-25W at night (standby consumption or sensor drift).
-    # We must explicitly record 0.0 for night hours to prevent the learning algorithm
-    # from thinking there is solar power at 10 PM.
-    if hour < 6 or hour >= 19:
-        clean_generation = 0.0
-    else:
-        clean_generation = current_generation
+    # --- NOISE FILTER ---
+    if h < 6 or h >= 19: clean_gen = 0.0
+    else: clean_gen = current_generation
     
-    # Calculate current generation percentage of capacity
-    current_capacity_pct = 0
-    if TOTAL_SOLAR_CAPACITY_KW * 1000 > 0:
-        current_capacity_pct = min(clean_generation / (TOTAL_SOLAR_CAPACITY_KW * 1000), 1.0)
-    
-    # Update pattern
+    max_w = TOTAL_SOLAR_CAPACITY_KW * 1000
     solar_generation_pattern.append({
-        'timestamp': now,
-        'hour': hour,
-        'generation': clean_generation,
-        'capacity_pct': current_capacity_pct,
-        'max_possible': TOTAL_SOLAR_CAPACITY_KW * 1000
+        'hour': h, 'generation': clean_gen, 'max_possible': max_w
     })
 
 def update_load_pattern(current_load):
-    """Update historical load pattern with current data"""
-    now = datetime.now(EAT)
-    hour = now.hour
-    
-    load_demand_pattern.append({
-        'timestamp': now,
-        'hour': hour,
-        'load': current_load
-    })
+    load_demand_pattern.append({'hour': datetime.now(EAT).hour, 'load': current_load})
 
 # ----------------------------
 # Email function with alert history tracking
@@ -1166,13 +982,9 @@ def poll_growatt():
             solar_forecast.clear()
             load_forecast = []
             
-            if weather_forecast:
-                solar_forecast_data = generate_solar_forecast(weather_forecast, solar_pattern)
-                solar_forecast.extend(solar_forecast_data)
-                
-                # Generate load forecast
-                load_forecast_data = generate_load_forecast(load_pattern)
-                load_forecast.extend(load_forecast_data)
+            # Always run forecast generation, even if weather is partial (it handles robustness now)
+            solar_forecast = generate_solar_forecast(weather_forecast, solar_pattern)
+            load_forecast = generate_load_forecast(load_pattern)
             
             # Calculate system metrics
             primary_battery_min = min(primary_capacities) if primary_capacities else 0
@@ -1181,14 +993,12 @@ def poll_growatt():
             backup_active = backup_data['OutputPower'] > 50 if backup_data else False
             
             # Calculate battery life prediction (CASCADE LOGIC)
-            battery_life_prediction = None
-            if solar_forecast and load_forecast:
-                battery_life_prediction = calculate_battery_cascade(
-                    solar_forecast, 
-                    load_forecast, 
-                    primary_battery_min,
-                    backup_active
-                )
+            battery_life_prediction = calculate_battery_cascade(
+                solar_forecast, 
+                load_forecast, 
+                primary_battery_min,
+                backup_active
+            )
             
             # Save latest data
             latest_data = {
@@ -1261,20 +1071,11 @@ def home():
     
     # Prepare forecast chart data
     forecast_times = []
-    solar_forecast_values = []
-    load_forecast_values = []
-    net_deficit_values = []
     
-    if solar_forecast_data and load_forecast_data:
-        for i in range(min(len(solar_forecast_data), len(load_forecast_data))):
+    if solar_forecast_data:
+        for i in range(len(solar_forecast_data)):
             forecast_times.append(solar_forecast_data[i]['time'].strftime('%H:%M'))
-            solar_forecast_values.append(solar_forecast_data[i]['estimated_generation'])
-            load_forecast_values.append(load_forecast_data[i]['estimated_load'])
             
-            # Calculate net deficit (positive = need battery, negative = surplus)
-            net_deficit = load_forecast_data[i]['estimated_load'] - solar_forecast_data[i]['estimated_generation']
-            net_deficit_values.append(net_deficit)
-    
     # Battery CASCADE data for new chart
     sim_times = []
     trace_primary = []
@@ -1290,10 +1091,10 @@ def home():
         trace_deficit = battery_life_prediction.get('deficit_trace', [])
         
         # Determine battery prediction message
-        if battery_life_prediction.get('will_need_genset'):
+        if battery_life_prediction.get('will_need_generator'):
              pred_class = "critical"
              pred_message = "🚨 CRITICAL: Generator will be needed!"
-        elif min(trace_primary) <= 0:
+        elif trace_primary and min(trace_primary) <= 0:
              pred_class = "warning"
              pred_message = "⚠️ WARNING: Primary battery will deplete."
         else:
@@ -1654,7 +1455,7 @@ def home():
                 <strong>Last Updated:</strong> {latest_data.get('timestamp', 'N/A')}
             </div>
             
-            <div class="system-status {'critical' if generator_running or backup_voltage < 51.2 else 'warning' if backup_active else 'normal'}">
+            <div class="system-status {'critical' if generator_running else 'warning' if backup_active else 'normal'}">
                 <h2>{'🚨 GENERATOR RUNNING' if generator_running else '🚨 GENERATOR STARTING' if backup_voltage < 51.2 else '⚠️ BACKUP SYSTEM ACTIVE' if backup_active else '✓ NORMAL OPERATION'}</h2>
                 <div class="status-text">
                     {
@@ -1885,81 +1686,18 @@ def home():
         </div>
 """
     
-    html += """
-        <div class="card">
-            <div class="chart-container">
-                <h2>Power Monitoring - Last 12 Hours</h2>
-                <canvas id="powerChart"></canvas>
-            </div>
-            
-            <script>
-                const ctx = document.getElementById('powerChart').getContext('2d');
-                new Chart(ctx, {
-                    type: 'line',
-                    data: {
-                        labels: """ + str(times) + """,
-                        datasets: [
-                            {
-                                label: 'Total Load (W)',
-                                data: """ + str(load_values) + """,
-                                borderColor: 'rgb(102, 126, 234)',
-                                backgroundColor: 'rgba(102, 126, 234, 0.1)',
-                                borderWidth: 3,
-                                tension: 0.4,
-                                fill: true
-                            },
-                            {
-                                label: 'Battery Discharge (W)',
-                                data: """ + str(battery_values) + """,
-                                borderColor: 'rgb(235, 51, 73)',
-                                backgroundColor: 'rgba(235, 51, 73, 0.1)',
-                                borderWidth: 3,
-                                tension: 0.4,
-                                fill: true
-                            }
-                        ]
-                    },
-                    options: {
-                        responsive: true,
-                        interaction: {
-                            mode: 'index',
-                            intersect: false
-                        },
-                        scales: {
-                            y: {
-                                type: 'linear',
-                                display: true,
-                                title: {
-                                    display: true,
-                                    text: 'Power (W)',
-                                    font: { size: 14, weight: 'bold' }
-                                }
-                            }
-                        },
-                        plugins: {
-                            legend: {
-                                display: true,
-                                position: 'top'
-                            }
-                        }
-                    }
-                });
-            </script>
-        </div>
-"""
-    
-    # NEW CASCADE CHART
+    # CHARTS SECTION
     if sim_times:
-        html += f'''
+        html += f"""
         <div class="card">
             <div class="chart-container">
                 <h2>🔋 Power Deficit & Battery Cascade Prediction</h2>
                 <p style="color: #666; margin-bottom: 15px; font-size: 0.95em;">
-                    <strong>Simulation Order:</strong> 
+                    <strong>Simulation:</strong> 
                     <span style="color:#27ae60">■ Primary Battery</span> &rarr; 
                     <span style="color:#d35400">■ Backup Battery</span> &rarr; 
                     <span style="color:#c0392b">■ Generator Needed</span>.
-                    <br>Gray bars show the instantaneous power deficit (Load - Solar) that causes the drain.
+                    <br>Gray bars show instantaneous power deficit (Load - Solar).
                 </p>
                 <canvas id="cascadeChart"></canvas>
             </div>
@@ -1973,7 +1711,7 @@ def home():
                         datasets: [
                             {{
                                 type: 'bar',
-                                label: 'Net Deficit (Watts)',
+                                label: 'Net Deficit (W)',
                                 data: {trace_deficit},
                                 backgroundColor: 'rgba(100, 100, 100, 0.2)',
                                 borderColor: '#666',
@@ -2018,7 +1756,7 @@ def home():
                                 type: 'linear',
                                 display: true,
                                 position: 'left',
-                                title: {{ display: true, text: 'Energy Stored / Needed (kWh)', font: {{size:14, weight:'bold'}} }},
+                                title: {{ display: true, text: 'Energy (kWh)', font: {{size:14, weight:'bold'}} }},
                                 stacked: false,
                                 beginAtZero: true,
                                 suggestedMax: 30
@@ -2027,7 +1765,7 @@ def home():
                                 type: 'linear',
                                 display: true,
                                 position: 'right',
-                                title: {{ display: true, text: 'Instant Deficit (Watts)', font: {{size:14, weight:'bold'}} }},
+                                title: {{ display: true, text: 'Deficit (Watts)', font: {{size:14, weight:'bold'}} }},
                                 grid: {{ drawOnChartArea: false }}
                             }}
                         }}
@@ -2035,9 +1773,72 @@ def home():
                 }});
             </script>
         </div>
-        '''
+        """
     else:
-        html += '''<div class="card"><h2>🔋 Cascade Prediction</h2><p>Initializing...</p></div>'''
+        html += """<div class="card"><h2>🔋 Cascade Prediction</h2><p style="padding:20px;text-align:center">Waiting for forecast data...</p></div>"""
+
+    html += f"""
+        <div class="card">
+            <div class="chart-container">
+                <h2>Power Monitoring - Last 12 Hours</h2>
+                <canvas id="powerChart"></canvas>
+            </div>
+            
+            <script>
+                const ctx = document.getElementById('powerChart').getContext('2d');
+                new Chart(ctx, {{
+                    type: 'line',
+                    data: {{
+                        labels: {times},
+                        datasets: [
+                            {{
+                                label: 'Total Load (W)',
+                                data: {load_values},
+                                borderColor: 'rgb(102, 126, 234)',
+                                backgroundColor: 'rgba(102, 126, 234, 0.1)',
+                                borderWidth: 3,
+                                tension: 0.4,
+                                fill: true
+                            }},
+                            {{
+                                label: 'Battery Discharge (W)',
+                                data: {battery_values},
+                                borderColor: 'rgb(235, 51, 73)',
+                                backgroundColor: 'rgba(235, 51, 73, 0.1)',
+                                borderWidth: 3,
+                                tension: 0.4,
+                                fill: true
+                            }}
+                        ]
+                    }},
+                    options: {{
+                        responsive: true,
+                        interaction: {{
+                            mode: 'index',
+                            intersect: false
+                        }},
+                        scales: {{
+                            y: {{
+                                type: 'linear',
+                                display: true,
+                                title: {{
+                                    display: true,
+                                    text: 'Power (W)',
+                                    font: {{ size: 14, weight: 'bold' }}
+                                }}
+                            }}
+                        }},
+                        plugins: {{
+                            legend: {{
+                                display: true,
+                                position: 'top'
+                            }}
+                        }}
+                    }}
+                }});
+            </script>
+        </div>
+    """
     
     html += """
         <div class="footer">
