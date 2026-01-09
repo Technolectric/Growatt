@@ -92,7 +92,7 @@ last_communication = {}  # Track last successful communication per inverter
 solar_forecast = []  # List of tuples (time, forecasted_generation)
 solar_generation_pattern = deque(maxlen=24)  # Store solar generation for pattern recognition
 load_demand_pattern = deque(maxlen=24)  # Store load demand for pattern recognition
-calibration_factor = 0.8  # Default efficiency factor for solar panels
+SOLAR_EFFICIENCY_FACTOR = 0.8  # Fixed efficiency factor for solar panels (accounts for dust, temperature, etc.)
 FORECAST_HOURS = 12  # Number of hours to forecast
 
 # East African Timezone
@@ -390,9 +390,9 @@ def generate_solar_forecast(solar_conditions, historical_pattern):
     # Maximum possible generation (10kW system at 1000W/m²)
     max_possible_generation = TOTAL_SOLAR_CAPACITY_KW * 1000  # 10000W
     
-    # Base generation estimate from weather
+    # Base generation estimate from weather with fixed efficiency factor
     weather_based_generation = min(
-        (adjusted_radiation / 1000) * max_possible_generation * calibration_factor,
+        (adjusted_radiation / 1000) * max_possible_generation * SOLAR_EFFICIENCY_FACTOR,
         max_possible_generation
     )
     
@@ -458,21 +458,20 @@ def generate_load_forecast(historical_pattern):
     now = datetime.now(EAT)
     
     if not historical_pattern:
-        # Default pattern if no history
-        default_load = 1000  # 1kW default
+        # Default pattern if no history - use typical residential pattern
         for hour_offset in range(FORECAST_HOURS):
             forecast_time = now + timedelta(hours=hour_offset)
             hour_of_day = forecast_time.hour
             
-            # Slight variation based on time of day
+            # Typical residential load pattern in watts
             if 6 <= hour_of_day <= 9:  # Morning peak
-                load = default_load * 1.5
+                load = 2500  # 2.5kW morning load
             elif 18 <= hour_of_day <= 22:  # Evening peak
-                load = default_load * 2.0
+                load = 2800  # 2.8kW evening load
             elif hour_of_day < 6 or hour_of_day >= 23:  # Night low
-                load = default_load * 0.5
+                load = 800   # 0.8kW overnight
             else:  # Daytime normal
-                load = default_load
+                load = 1500  # 1.5kW daytime
             
             forecast.append({
                 'time': forecast_time,
@@ -481,14 +480,12 @@ def generate_load_forecast(historical_pattern):
             })
     else:
         # Use historical pattern
-        max_system_capacity = PRIMARY_INVERTER_CAPACITY_W + BACKUP_INVERTER_CAPACITY_W
-        
         for hour_offset in range(FORECAST_HOURS):
             forecast_time = now + timedelta(hours=hour_offset)
             hour_of_day = forecast_time.hour
             
             # Find historical pattern for this hour
-            pattern_load = 1000  # Default
+            pattern_load = 1500  # Default 1.5kW
             for pattern_hour, normalized, actual_load in historical_pattern:
                 if pattern_hour == hour_of_day:
                     pattern_load = actual_load
@@ -570,7 +567,7 @@ def calculate_battery_life(solar_forecast_data, load_forecast_data, current_prim
         'will_need_generator': total_deficit_wh > (current_primary_wh + current_backup_wh)
     }
 
-def update_solar_pattern(current_generation, solar_input):
+def update_solar_pattern(current_generation):
     """Update historical solar pattern with current data"""
     now = datetime.now(EAT)
     hour = now.hour
@@ -585,20 +582,9 @@ def update_solar_pattern(current_generation, solar_input):
         'timestamp': now,
         'hour': hour,
         'generation': current_generation,
-        'solar_input': solar_input,
         'capacity_pct': current_capacity_pct,
         'max_possible': TOTAL_SOLAR_CAPACITY_KW * 1000
     })
-    
-    # Update calibration factor based on actual vs expected
-    if solar_input > 100 and current_generation > 100:  # Only during productive hours
-        expected = (solar_input / 1000) * TOTAL_SOLAR_CAPACITY_KW * 1000
-        if expected > 0:
-            new_calibration = current_generation / expected
-            # Smooth update (weighted average)
-            global calibration_factor
-            calibration_factor = calibration_factor * 0.9 + new_calibration * 0.1
-            calibration_factor = min(max(calibration_factor, 0.5), 1.0)  # Keep between 0.5-1.0
 
 def update_load_pattern(current_load):
     """Update historical load pattern with current data"""
@@ -1082,7 +1068,7 @@ def poll_growatt():
             inverter_data.sort(key=lambda x: x.get('DisplayOrder', 99))
             
             # Update solar and load patterns
-            update_solar_pattern(total_solar_input_W, total_solar_input_W)
+            update_solar_pattern(total_solar_input_W)
             update_load_pattern(total_output_power)
             
             # Analyze historical patterns
@@ -1308,7 +1294,7 @@ def home():
         }}
         
         .system-status.critical {{
-            background: linear-gradient(135deg, #eb3345 0%, #f45c43 100%);
+            background: linear-gradient(135deg, #dc3545 0%, #f45c43 100%);
         }}
         
         .system-status h2 {{
@@ -1347,7 +1333,7 @@ def home():
         }}
         
         .battery-prediction.critical {{
-            background: linear-gradient(135deg, #eb3345 0%, #f45c43 100%);
+            background: linear-gradient(135deg, #dc3545 0%, #f45c43 100%);
         }}
         
         h2 {{ 
@@ -1385,7 +1371,7 @@ def home():
         }}
         
         .metric.red {{
-            background: linear-gradient(135deg, #eb3345 0%, #f45c43 100%);
+            background: linear-gradient(135deg, #dc3545 0%, #f45c43 100%);
         }}
         
         .metric.blue {{
@@ -1394,10 +1380,6 @@ def home():
         
         .metric.gray {{
             background: linear-gradient(135deg, #757F9A 0%, #D7DDE8 100%);
-        }}
-        
-        .metric.purple {{
-            background: linear-gradient(135deg, #8A2387 0%, #E94057 100%);
         }}
         
         .metric-label {{
@@ -1438,7 +1420,7 @@ def home():
         }}
         
         .inverter-card.offline {{
-            border-left-color: #eb3345;
+            border-left-color: #dc3545;
             background: #fff0f0;
         }}
         
@@ -1485,7 +1467,7 @@ def home():
         }}
         
         .temp-critical {{
-            color: #eb3345;
+            color: #dc3545;
             font-weight: bold;
         }}
         
@@ -1693,12 +1675,6 @@ def home():
                     <div class="metric-value">{'ON' if generator_running else 'OFF'}</div>
                     <div class="metric-subtext">{'Running' if generator_running else 'Standby'}</div>
                 </div>
-                
-                <div class="metric purple">
-                    <div class="metric-label">System Efficiency</div>
-                    <div class="metric-value">{calibration_factor*100:.0f}%</div>
-                    <div class="metric-subtext">Solar Panel Calibration</div>
-                </div>
             </div>
             
             <h2>Inverter Details</h2>
@@ -1723,7 +1699,7 @@ def home():
         
         if is_offline:
             html += f"""
-                    <div style="color: #eb3345; padding: 10px; background: #fff0f0; border-radius: 5px; margin-bottom: 10px;">
+                    <div style="color: #dc3545; padding: 10px; background: #fff0f0; border-radius: 5px; margin-bottom: 10px;">
                         <strong>⚠️ COMMUNICATION LOST</strong><br>
                         Last seen: {inv.get('last_seen', 'Unknown')}
                     </div>
@@ -1773,7 +1749,7 @@ def home():
             if inv.get('has_fault'):
                 fault_info = inv.get('fault_info', {})
                 html += f"""
-                    <div style="color: #eb3345; padding: 10px; background: #fff0f0; border-radius: 5px; margin-top: 10px;">
+                    <div style="color: #dc3545; padding: 10px; background: #fff0f0; border-radius: 5px; margin-top: 10px;">
                         <strong>⚠️ FAULT DETECTED</strong><br>
                         Error: {fault_info.get('errorCode', 0)} | Fault: {fault_info.get('faultCode', 0)}
                     </div>
@@ -1800,14 +1776,14 @@ def home():
         
         def get_alert_badge(alert_type):
             badges = {
-                "critical": ("🔴", "Critical", "#eb3345"),
-                "very_high_load": ("🔴", "Very High Discharge", "#eb3345"),
+                "critical": ("🔴", "Critical", "#dc3545"),
+                "very_high_load": ("🔴", "Very High Discharge", "#dc3545"),
                 "backup_active": ("🟠", "Backup Active", "#ff9800"),
                 "high_load": ("🟠", "High Discharge", "#ff9800"),
                 "warning": ("🟡", "Warning", "#ffc107"),
                 "moderate_load": ("🔵", "Moderate Discharge", "#2196F3"),
                 "communication_lost": ("⚠️", "Comm Lost", "#ff9800"),
-                "fault_alarm": ("🚨", "Fault", "#eb3345"),
+                "fault_alarm": ("🚨", "Fault", "#dc3545"),
                 "high_temperature": ("🌡️", "High Temp", "#ff9800"),
                 "test": ("⚪", "Test", "#9e9e9e"),
                 "general": ("⚪", "Info", "#9e9e9e")
