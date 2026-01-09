@@ -1,6 +1,7 @@
 import os
 import time
 import requests
+import json
 from datetime import datetime, timedelta, timezone
 from threading import Thread
 from flask import Flask, render_template_string, request, jsonify
@@ -952,6 +953,16 @@ def home():
             pred_class = "good"
             pred_message = "✓ OK: Battery sufficient for forecast period."
     
+    # Convert to JSON for JavaScript
+    sim_times_json = json.dumps(sim_times)
+    trace_primary_json = json.dumps(trace_primary)
+    trace_backup_json = json.dumps(trace_backup)
+    trace_genset_json = json.dumps(trace_genset)
+    trace_deficit_json = json.dumps(trace_deficit)
+    times_json = json.dumps(times)
+    load_values_json = json.dumps(load_values)
+    battery_values_json = json.dumps(battery_values)
+    
     solar_conditions = solar_conditions_cache
     
     html = f"""
@@ -1190,15 +1201,15 @@ def home():
                 new Chart(document.getElementById('cascadeChart'), {{
                     type: 'line',
                     data: {{
-                        labels: {sim_times},
+                        labels: {sim_times_json},
                         datasets: [
-                            {{ type: 'bar', label: 'Deficit (W)', data: {trace_deficit}, backgroundColor: 'rgba(100,100,100,0.2)', 
+                            {{ type: 'bar', label: 'Deficit (W)', data: {trace_deficit_json}, backgroundColor: 'rgba(100,100,100,0.2)', 
                                yAxisID: 'y_power', order: 4 }},
-                            {{ label: 'Generator (kWh)', data: {trace_genset}, backgroundColor: 'rgba(231,76,60,0.6)', 
+                            {{ label: 'Generator (kWh)', data: {trace_genset_json}, backgroundColor: 'rgba(231,76,60,0.6)', 
                                borderColor: '#c0392b', fill: true, yAxisID: 'y_energy', order: 1 }},
-                            {{ label: 'Backup (kWh)', data: {trace_backup}, backgroundColor: 'rgba(230,126,34,0.5)', 
+                            {{ label: 'Backup (kWh)', data: {trace_backup_json}, backgroundColor: 'rgba(230,126,34,0.5)', 
                                borderColor: '#d35400', fill: true, yAxisID: 'y_energy', order: 2 }},
-                            {{ label: 'Primary (kWh)', data: {trace_primary}, backgroundColor: 'rgba(46,204,113,0.5)', 
+                            {{ label: 'Primary (kWh)', data: {trace_primary_json}, backgroundColor: 'rgba(46,204,113,0.5)', 
                                borderColor: '#27ae60', fill: true, yAxisID: 'y_energy', order: 3 }}
                         ]
                     }},
@@ -1216,6 +1227,15 @@ def home():
             </script>
         </div>
 """
+    else:
+        html += """
+        <div class="card">
+            <div class="chart-container">
+                <h2>🔋 Battery Cascade Prediction</h2>
+                <p style="padding:20px;text-align:center;color:#666">Collecting data for prediction... Please wait a few minutes.</p>
+            </div>
+        </div>
+"""
     
     # Historical chart
     html += f"""
@@ -1228,11 +1248,11 @@ def home():
                 new Chart(document.getElementById('powerChart'), {{
                     type: 'line',
                     data: {{
-                        labels: {times},
+                        labels: {times_json},
                         datasets: [
-                            {{ label: 'Total Load (W)', data: {load_values}, borderColor: 'rgb(102,126,234)', 
+                            {{ label: 'Total Load (W)', data: {load_values_json}, borderColor: 'rgb(102,126,234)', 
                                backgroundColor: 'rgba(102,126,234,0.1)', borderWidth: 3, tension: 0.4, fill: true }},
-                            {{ label: 'Battery Discharge (W)', data: {battery_values}, borderColor: 'rgb(235,51,73)', 
+                            {{ label: 'Battery Discharge (W)', data: {battery_values_json}, borderColor: 'rgb(235,51,73)', 
                                backgroundColor: 'rgba(235,51,73,0.1)', borderWidth: 3, tension: 0.4, fill: true }}
                         ]
                     }},
