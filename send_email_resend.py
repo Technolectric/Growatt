@@ -48,6 +48,13 @@ INVERTER_TEMP_CRITICAL = 70  # °C
 # Communication timeout
 COMMUNICATION_TIMEOUT_MINUTES = 10
 
+# Battery Specifications (LiFePO4)
+PRIMARY_BATTERY_CAPACITY_WH = 30000  # 30kWh
+PRIMARY_BATTERY_USABLE_WH = 18000    # 60% usable (down to 40%)
+BACKUP_BATTERY_CAPACITY_WH = 30000   # 30kWh original
+BACKUP_BATTERY_DEGRADED_WH = 21000   # 70% remaining after 5 years (15% degradation per year)
+BACKUP_BATTERY_USABLE_WH = 14700     # 70% of degraded capacity
+
 # Tiered Load Alert System (SOLAR-AWARE - only alerts on battery discharge)
 # TIER 1: Moderate battery discharge (1000-1500W) + Low Battery - 120 min cooldown
 # TIER 2: High battery discharge (1500-2500W) - 60 min cooldown
@@ -84,6 +91,7 @@ last_communication = {}  # Track last successful communication per inverter
 # Solar forecast globals
 solar_forecast = []  # List of tuples (time, forecasted_generation)
 solar_generation_pattern = deque(maxlen=24)  # Store solar generation for pattern recognition
+load_demand_pattern = deque(maxlen=24)  # Store load demand for pattern recognition
 calibration_factor = 0.8  # Default efficiency factor for solar panels
 FORECAST_HOURS = 12  # Number of hours to forecast
 
@@ -340,6 +348,27 @@ def analyze_historical_solar_pattern():
     
     return pattern
 
+def analyze_historical_load_pattern():
+    """Analyze historical load demand to establish a pattern"""
+    if len(load_demand_pattern) < 3:
+        return None
+    
+    # Create a baseline pattern
+    pattern = []
+    for hour_data in load_demand_pattern:
+        hour = hour_data['hour']
+        load = hour_data['load']
+        # Normalize to 0-1 based on system capacity
+        max_possible = PRIMARY_INVERTER_CAPACITY_W + BACKUP_INVERTER_CAPACITY_W
+        if max_possible > 0:
+            normalized = load / max_possible
+            pattern.append((hour, normalized, load))
+    
+    if not pattern:
+        return None
+    
+    return pattern
+
 def generate_solar_forecast(solar_conditions, historical_pattern):
     """Generate solar generation forecast based on weather and historical patterns"""
     forecast = []
@@ -423,6 +452,124 @@ def generate_solar_forecast(solar_conditions, historical_pattern):
     
     return forecast
 
+def generate_load_forecast(historical_pattern):
+    """Generate load demand forecast based on historical patterns"""
+    forecast = []
+    now = datetime.now(EAT)
+    
+    if not historical_pattern:
+        # Default pattern if no history
+        default_load = 1000  # 1kW default
+        for hour_offset in range(FORECAST_HOURS):
+            forecast_time = now + timedelta(hours=hour_offset)
+            hour_of_day = forecast_time.hour
+            
+            # Slight variation based on time of day
+            if 6 <= hour_of_day <= 9:  # Morning peak
+                load = default_load * 1.5
+            elif 18 <= hour_of_day <= 22:  # Evening peak
+                load = default_load * 2.0
+            elif hour_of_day < 6 or hour_of_day >= 23:  # Night low
+                load = default_load * 0.5
+            else:  # Daytime normal
+                load = default_load
+            
+            forecast.append({
+                'time': forecast_time,
+                'hour': hour_of_day,
+                'estimated_load': load
+            })
+    else:
+        # Use historical pattern
+        max_system_capacity = PRIMARY_INVERTER_CAPACITY_W + BACKUP_INVERTER_CAPACITY_W
+        
+        for hour_offset in range(FORECAST_HOURS):
+            forecast_time = now + timedelta(hours=hour_offset)
+            hour_of_day = forecast_time.hour
+            
+            # Find historical pattern for this hour
+            pattern_load = 1000  # Default
+            for pattern_hour, normalized, actual_load in historical_pattern:
+                if pattern_hour == hour_of_day:
+                    pattern_load = actual_load
+                    break
+            
+            forecast.append({
+                'time': forecast_time,
+                'hour': hour_of_day,
+                'estimated_load': pattern_load
+            })
+    
+    return forecast
+
+def calculate_battery_life(solar_forecast_data, load_forecast_data, current_primary_percent, backup_active=False):
+    """Calculate how long batteries will last based on forecast"""
+    if not solar_forecast_data or not load_forecast_data:
+        return None
+    
+    # Current battery state
+    current_primary_wh = (current_primary_percent / 100) * PRIMARY_BATTERY_USABLE_WH
+    current_backup_wh = BACKUP_BATTERY_USABLE_WH * 0.8  # Assume 80% charged when not active
+    
+    # Track battery levels over time
+    primary_battery_trace = [current_primary_wh]
+    backup_battery_trace = [current_backup_wh]
+    net_deficit_trace = []
+    hours_until_depletion = FORECAST_HOURS  # Default: lasts entire forecast period
+    depletion_hour = None
+    
+    # Simulate each hour
+    for i in range(min(len(solar_forecast_data), len(load_forecast_data))):
+        solar = solar_forecast_data[i]['estimated_generation']
+        load = load_forecast_data[i]['estimated_load']
+        
+        # Net energy for this hour (Wh = W × 1 hour)
+        net_energy_wh = (load - solar)  # Positive = deficit, Negative = surplus
+        
+        net_deficit_trace.append(net_energy_wh)
+        
+        # Update battery levels
+        if backup_active:
+            # Using backup battery
+            current_backup_wh -= net_energy_wh
+            current_backup_wh = max(0, min(current_backup_wh, BACKUP_BATTERY_USABLE_WH))
+            backup_battery_trace.append(current_backup_wh)
+            
+            # Check if backup depleted
+            if current_backup_wh <= 0 and depletion_hour is None:
+                depletion_hour = i
+                hours_until_depletion = i
+        else:
+            # Using primary battery
+            current_primary_wh -= net_energy_wh
+            current_primary_wh = max(0, min(current_primary_wh, PRIMARY_BATTERY_USABLE_WH))
+            primary_battery_trace.append(current_primary_wh)
+            
+            # Check if primary depleted and switch to backup
+            if current_primary_wh <= 0 and depletion_hour is None:
+                depletion_hour = i
+                hours_until_depletion = i
+    
+    # Calculate summary statistics
+    total_deficit_wh = sum([max(0, nd) for nd in net_deficit_trace])  # Only positive deficits
+    total_surplus_wh = sum([max(0, -nd) for nd in net_deficit_trace])  # Only negative deficits (surplus)
+    
+    # Average deficit during deficit hours
+    deficit_hours = [nd for nd in net_deficit_trace if nd > 0]
+    avg_deficit_w = np.mean(deficit_hours) if deficit_hours else 0
+    
+    return {
+        'primary_battery_trace': primary_battery_trace,
+        'backup_battery_trace': backup_battery_trace,
+        'net_deficit_trace': net_deficit_trace,
+        'hours_until_depletion': hours_until_depletion,
+        'depletion_hour': depletion_hour,
+        'total_deficit_wh': total_deficit_wh,
+        'total_surplus_wh': total_surplus_wh,
+        'avg_deficit_w': avg_deficit_w,
+        'will_need_generator': total_deficit_wh > (current_primary_wh + current_backup_wh)
+    }
+
 def update_solar_pattern(current_generation, solar_input):
     """Update historical solar pattern with current data"""
     now = datetime.now(EAT)
@@ -452,6 +599,17 @@ def update_solar_pattern(current_generation, solar_input):
             global calibration_factor
             calibration_factor = calibration_factor * 0.9 + new_calibration * 0.1
             calibration_factor = min(max(calibration_factor, 0.5), 1.0)  # Keep between 0.5-1.0
+
+def update_load_pattern(current_load):
+    """Update historical load pattern with current data"""
+    now = datetime.now(EAT)
+    hour = now.hour
+    
+    load_demand_pattern.append({
+        'timestamp': now,
+        'hour': hour,
+        'load': current_load
+    })
 
 # ----------------------------
 # Email function with alert history tracking
@@ -923,23 +1081,41 @@ def poll_growatt():
             # Sort inverters by display order
             inverter_data.sort(key=lambda x: x.get('DisplayOrder', 99))
             
-            # Update solar pattern and generate forecast
+            # Update solar and load patterns
             update_solar_pattern(total_solar_input_W, total_solar_input_W)
+            update_load_pattern(total_output_power)
             
-            # Analyze historical pattern
-            historical_pattern = analyze_historical_solar_pattern()
+            # Analyze historical patterns
+            solar_pattern = analyze_historical_solar_pattern()
+            load_pattern = analyze_historical_load_pattern()
             
-            # Generate solar forecast
+            # Generate forecasts
             solar_forecast.clear()
+            load_forecast = []
+            
             if solar_conditions_cache:
-                forecast_data = generate_solar_forecast(solar_conditions_cache, historical_pattern)
-                solar_forecast.extend(forecast_data)
+                solar_forecast_data = generate_solar_forecast(solar_conditions_cache, solar_pattern)
+                solar_forecast.extend(solar_forecast_data)
+                
+                # Generate load forecast
+                load_forecast_data = generate_load_forecast(load_pattern)
+                load_forecast.extend(load_forecast_data)
             
             # Calculate system metrics
             primary_battery_min = min(primary_capacities) if primary_capacities else 0
             backup_battery_voltage = backup_data['vBat'] if backup_data else 0
             backup_voltage_status, backup_voltage_color = get_backup_voltage_status(backup_battery_voltage)
             backup_active = backup_data['OutputPower'] > 50 if backup_data else False
+            
+            # Calculate battery life prediction
+            battery_life_prediction = None
+            if solar_forecast and load_forecast:
+                battery_life_prediction = calculate_battery_life(
+                    solar_forecast, 
+                    load_forecast, 
+                    primary_battery_min,
+                    backup_active
+                )
             
             # Save latest data
             latest_data = {
@@ -955,7 +1131,10 @@ def poll_growatt():
                 "generator_running": generator_running,
                 "inverters": inverter_data,
                 "solar_forecast": solar_forecast,
-                "historical_pattern_count": len(solar_generation_pattern)
+                "load_forecast": load_forecast,
+                "battery_life_prediction": battery_life_prediction,
+                "historical_pattern_count": len(solar_generation_pattern),
+                "load_pattern_count": len(load_demand_pattern)
             }
             
             # Append to history
@@ -1002,24 +1181,48 @@ def home():
     
     # Solar forecast chart data
     solar_forecast_data = latest_data.get("solar_forecast", [])
+    load_forecast_data = latest_data.get("load_forecast", [])
+    battery_life_prediction = latest_data.get("battery_life_prediction")
     historical_pattern_count = latest_data.get("historical_pattern_count", 0)
+    load_pattern_count = latest_data.get("load_pattern_count", 0)
     
     # Prepare forecast chart data
     forecast_times = []
-    forecast_values = []
-    forecast_weather_based = []
-    forecast_pattern_based = []
+    solar_forecast_values = []
+    load_forecast_values = []
+    net_deficit_values = []
     
-    if solar_forecast_data and historical_pattern_count >= 3:
-        for forecast in solar_forecast_data:
-            forecast_times.append(forecast['time'].strftime('%H:%M'))
-            forecast_values.append(forecast['estimated_generation'])
-            forecast_weather_based.append(forecast['weather_based'])
-            forecast_pattern_based.append(forecast['pattern_based'])
+    if solar_forecast_data and load_forecast_data:
+        for i in range(min(len(solar_forecast_data), len(load_forecast_data))):
+            forecast_times.append(solar_forecast_data[i]['time'].strftime('%H:%M'))
+            solar_forecast_values.append(solar_forecast_data[i]['estimated_generation'])
+            load_forecast_values.append(load_forecast_data[i]['estimated_load'])
+            
+            # Calculate net deficit (positive = need battery, negative = surplus)
+            net_deficit = load_forecast_data[i]['estimated_load'] - solar_forecast_data[i]['estimated_generation']
+            net_deficit_values.append(net_deficit)
+    
+    # Battery prediction data
+    battery_trace = []
+    battery_trace_times = []
+    if battery_life_prediction:
+        # Add current time as starting point
+        battery_trace_times.append("Now")
+        if backup_active:
+            battery_trace.append(battery_life_prediction.get('backup_battery_trace', [0])[0] / 1000)  # Convert Wh to kWh
+        else:
+            battery_trace.append(battery_life_prediction.get('primary_battery_trace', [0])[0] / 1000)  # Convert Wh to kWh
+        
+        # Add forecast times
+        for i in range(min(len(solar_forecast_data), FORECAST_HOURS)):
+            battery_trace_times.append(solar_forecast_data[i]['time'].strftime('%H:%M'))
+            if backup_active and i < len(battery_life_prediction.get('backup_battery_trace', [])) - 1:
+                battery_trace.append(battery_life_prediction['backup_battery_trace'][i+1] / 1000)
+            elif i < len(battery_life_prediction.get('primary_battery_trace', [])) - 1:
+                battery_trace.append(battery_life_prediction['primary_battery_trace'][i+1] / 1000)
     
     # Use cached solar conditions (calculated in polling loop)
     solar_conditions = solar_conditions_cache
-    
     
     html = f"""
 <!DOCTYPE html>
@@ -1105,7 +1308,7 @@ def home():
         }}
         
         .system-status.critical {{
-            background: linear-gradient(135deg, #eb3349 0%, #f45c43 100%);
+            background: linear-gradient(135deg, #eb3345 0%, #f45c43 100%);
         }}
         
         .system-status h2 {{
@@ -1126,6 +1329,25 @@ def home():
         
         .weather-alert.poor {{
             background: linear-gradient(135deg, #f77f00 0%, #fcbf49 100%);
+        }}
+        
+        .battery-prediction {{
+            padding: 20px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            color: white;
+        }}
+        
+        .battery-prediction.good {{
+            background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
+        }}
+        
+        .battery-prediction.warning {{
+            background: linear-gradient(135deg, #f77f00 0%, #fcbf49 100%);
+        }}
+        
+        .battery-prediction.critical {{
+            background: linear-gradient(135deg, #eb3345 0%, #f45c43 100%);
         }}
         
         h2 {{ 
@@ -1163,7 +1385,7 @@ def home():
         }}
         
         .metric.red {{
-            background: linear-gradient(135deg, #eb3349 0%, #f45c43 100%);
+            background: linear-gradient(135deg, #eb3345 0%, #f45c43 100%);
         }}
         
         .metric.blue {{
@@ -1172,6 +1394,10 @@ def home():
         
         .metric.gray {{
             background: linear-gradient(135deg, #757F9A 0%, #D7DDE8 100%);
+        }}
+        
+        .metric.purple {{
+            background: linear-gradient(135deg, #8A2387 0%, #E94057 100%);
         }}
         
         .metric-label {{
@@ -1212,7 +1438,7 @@ def home():
         }}
         
         .inverter-card.offline {{
-            border-left-color: #dc3545;
+            border-left-color: #eb3345;
             background: #fff0f0;
         }}
         
@@ -1259,7 +1485,7 @@ def home():
         }}
         
         .temp-critical {{
-            color: #dc3545;
+            color: #eb3345;
             font-weight: bold;
         }}
         
@@ -1389,18 +1615,59 @@ def home():
             </div>
 """
     
+    # Battery life prediction
+    if battery_life_prediction:
+        hours_left = battery_life_prediction.get('hours_until_depletion', FORECAST_HOURS)
+        depletion_hour = battery_life_prediction.get('depletion_hour')
+        will_need_generator = battery_life_prediction.get('will_need_generator', False)
+        
+        if hours_left < FORECAST_HOURS:
+            if hours_left <= 3:
+                pred_class = "critical"
+                pred_message = f"🚨 CRITICAL: Battery will last only {hours_left} hours"
+                if depletion_hour is not None and solar_forecast_data:
+                    depletion_time = solar_forecast_data[depletion_hour]['time'].strftime('%H:%M')
+                    pred_message += f" (until ~{depletion_time})"
+            elif hours_left <= 6:
+                pred_class = "warning"
+                pred_message = f"⚠️ WARNING: Battery will last {hours_left} hours"
+            else:
+                pred_class = "good"
+                pred_message = f"✓ OK: Battery should last {hours_left}+ hours"
+            
+            if will_need_generator:
+                pred_message += " | 🔥 Generator may be needed"
+        else:
+            pred_class = "good"
+            pred_message = "✓ Excellent: Battery should last entire forecast period"
+        
+        # Calculate current battery energy
+        current_primary_kwh = (primary_battery / 100) * (PRIMARY_BATTERY_USABLE_WH / 1000)
+        
+        html += f"""
+            <div class="battery-prediction {pred_class}">
+                <h3>🔋 Battery Life Prediction</h3>
+                <p><strong>{pred_message}</strong></p>
+                <p><strong>Current Status:</strong> {primary_battery:.0f}% = {current_primary_kwh:.1f}kWh usable of {PRIMARY_BATTERY_USABLE_WH/1000:.0f}kWh</p>
+                <p><strong>Backup Reserve:</strong> {BACKUP_BATTERY_USABLE_WH/1000:.0f}kWh available (5yo LiFePO4, ~70% capacity)</p>
+                {f'<p><strong>Estimated Deficit:</strong> {battery_life_prediction.get("total_deficit_wh", 0)/1000:.1f}kWh needed from battery</p>' if battery_life_prediction.get('total_deficit_wh') else ''}
+                {f'<p><strong>Average Load:</strong> {battery_life_prediction.get("avg_deficit_w", 0):.0f}W when solar insufficient</p>' if battery_life_prediction.get('avg_deficit_w') else ''}
+                <p style="font-size: 0.85em; opacity: 0.8;">Based on {historical_pattern_count} solar patterns & {load_pattern_count} load patterns</p>
+            </div>
+"""
+    
     html += f"""
             <div class="metrics-grid">
                 <div class="metric {primary_color}">
                     <div class="metric-label">Primary Batteries</div>
                     <div class="metric-value">{primary_battery:.0f}%</div>
-                    <div class="metric-subtext">Inverters 1 & 2 (Min)</div>
+                    <div class="metric-subtext">{(primary_battery/100) * (PRIMARY_BATTERY_USABLE_WH/1000):.1f}kWh of {PRIMARY_BATTERY_USABLE_WH/1000:.0f}kWh</div>
                 </div>
                 
                 <div class="metric {backup_voltage_color}">
                     <div class="metric-label">Backup Battery</div>
                     <div class="metric-value">{backup_voltage:.1f}V</div>
-                    <div class="metric-subtext">{backup_voltage_status} | Gen at 51.2V</div>
+                    <div class="metric-subtext">{backup_voltage_status} | {BACKUP_BATTERY_USABLE_WH/1000:.0f}kWh capacity</div>
                 </div>
                 
                 <div class="metric blue">
@@ -1421,10 +1688,16 @@ def home():
                     <div class="metric-subtext">From Battery</div>
                 </div>
                 
-                <div class="metric {'green' if generator_running else 'orange' if backup_active else 'green'}">
+                <div class="metric {'red' if generator_running else 'orange' if backup_active else 'green'}">
                     <div class="metric-label">Generator</div>
                     <div class="metric-value">{'ON' if generator_running else 'OFF'}</div>
                     <div class="metric-subtext">{'Running' if generator_running else 'Standby'}</div>
+                </div>
+                
+                <div class="metric purple">
+                    <div class="metric-label">System Efficiency</div>
+                    <div class="metric-value">{calibration_factor*100:.0f}%</div>
+                    <div class="metric-subtext">Solar Panel Calibration</div>
                 </div>
             </div>
             
@@ -1450,7 +1723,7 @@ def home():
         
         if is_offline:
             html += f"""
-                    <div style="color: #dc3545; padding: 10px; background: #fff0f0; border-radius: 5px; margin-bottom: 10px;">
+                    <div style="color: #eb3345; padding: 10px; background: #fff0f0; border-radius: 5px; margin-bottom: 10px;">
                         <strong>⚠️ COMMUNICATION LOST</strong><br>
                         Last seen: {inv.get('last_seen', 'Unknown')}
                     </div>
@@ -1500,7 +1773,7 @@ def home():
             if inv.get('has_fault'):
                 fault_info = inv.get('fault_info', {})
                 html += f"""
-                    <div style="color: #dc3545; padding: 10px; background: #fff0f0; border-radius: 5px; margin-top: 10px;">
+                    <div style="color: #eb3345; padding: 10px; background: #fff0f0; border-radius: 5px; margin-top: 10px;">
                         <strong>⚠️ FAULT DETECTED</strong><br>
                         Error: {fault_info.get('errorCode', 0)} | Fault: {fault_info.get('faultCode', 0)}
                     </div>
@@ -1527,14 +1800,14 @@ def home():
         
         def get_alert_badge(alert_type):
             badges = {
-                "critical": ("🔴", "Critical", "#dc3545"),
-                "very_high_load": ("🔴", "Very High Discharge", "#dc3545"),
+                "critical": ("🔴", "Critical", "#eb3345"),
+                "very_high_load": ("🔴", "Very High Discharge", "#eb3345"),
                 "backup_active": ("🟠", "Backup Active", "#ff9800"),
                 "high_load": ("🟠", "High Discharge", "#ff9800"),
                 "warning": ("🟡", "Warning", "#ffc107"),
                 "moderate_load": ("🔵", "Moderate Discharge", "#2196F3"),
                 "communication_lost": ("⚠️", "Comm Lost", "#ff9800"),
-                "fault_alarm": ("🚨", "Fault", "#dc3545"),
+                "fault_alarm": ("🚨", "Fault", "#eb3345"),
                 "high_temperature": ("🌡️", "High Temp", "#ff9800"),
                 "test": ("⚪", "Test", "#9e9e9e"),
                 "general": ("⚪", "Info", "#9e9e9e")
@@ -1634,53 +1907,54 @@ def home():
 """
     
     # Solar Forecast Chart - Only show if we have enough historical data
-    if solar_forecast_data and historical_pattern_count >= 3:
+    if solar_forecast_data and load_forecast_data and historical_pattern_count >= 3:
         html += f'''
         <div class="card">
             <div class="chart-container">
-                <h2>🌤️ Solar Generation Forecast - Next {FORECAST_HOURS} Hours</h2>
+                <h2>🔮 Energy Forecast - Next {FORECAST_HOURS} Hours</h2>
                 <p style="color: #666; margin-bottom: 15px; font-size: 0.95em;">
                     <strong>Forecast Methodology:</strong> 
-                    {'Blended forecast (70% weather, 30% historical pattern) | Historical data: ' + str(historical_pattern_count) + ' points' if historical_pattern_count >= 10 else 
-                     'Weather-based forecast (learning historical patterns)'}
+                    {'Blended forecast (70% weather, 30% historical pattern) | ' + str(historical_pattern_count) + ' solar patterns, ' + str(load_pattern_count) + ' load patterns' if historical_pattern_count >= 10 else 
+                     'Weather-based forecast (learning patterns)'}
                     {f' | Cloud Factor: {solar_forecast_data[0]["cloud_factor"]*100:.0f}%' if solar_forecast_data else ''}
                 </p>
-                <canvas id="solarForecastChart"></canvas>
+                <canvas id="energyForecastChart"></canvas>
             </div>
             
             <script>
-                const forecastCtx = document.getElementById('solarForecastChart').getContext('2d');
-                new Chart(forecastCtx, {{
+                const energyCtx = document.getElementById('energyForecastChart').getContext('2d');
+                new Chart(energyCtx, {{
                     type: 'line',
                     data: {{
                         labels: {forecast_times},
                         datasets: [
                             {{
-                                label: 'Estimated Generation (W)',
-                                data: {forecast_values},
+                                label: 'Forecast Demand (W)',
+                                data: {load_forecast_values},
+                                borderColor: 'rgb(102, 126, 234)',
+                                backgroundColor: 'rgba(102, 126, 234, 0.1)',
+                                borderWidth: 3,
+                                tension: 0.4,
+                                fill: false
+                            }},
+                            {{
+                                label: 'Forecast Solar Production (W)',
+                                data: {solar_forecast_values},
                                 borderColor: 'rgb(255, 193, 7)',
                                 backgroundColor: 'rgba(255, 193, 7, 0.1)',
                                 borderWidth: 3,
                                 tension: 0.4,
-                                fill: true
+                                fill: false
                             }},
                             {{
-                                label: 'Weather-Based Estimate',
-                                data: {forecast_weather_based},
-                                borderColor: 'rgba(102, 126, 234, 0.5)',
+                                label: 'Net Deficit/Surplus (W)',
+                                data: {net_deficit_values},
+                                borderColor: 'rgb(235, 51, 73)',
+                                backgroundColor: 'rgba(235, 51, 73, 0.2)',
                                 borderWidth: 2,
-                                borderDash: [5, 5],
-                                fill: false,
-                                hidden: true
-                            }},
-                            {{
-                                label: 'Historical Pattern',
-                                data: {forecast_pattern_based},
-                                borderColor: 'rgba(76, 175, 80, 0.5)',
-                                borderWidth: 2,
-                                borderDash: [5, 5],
-                                fill: false,
-                                hidden: true
+                                tension: 0.4,
+                                fill: 'origin',
+                                pointRadius: 0
                             }}
                         ]
                     }},
@@ -1696,11 +1970,11 @@ def home():
                                 display: true,
                                 title: {{
                                     display: true,
-                                    text: 'Solar Generation (W)',
+                                    text: 'Power (W)',
                                     font: {{ size: 14, weight: 'bold' }}
                                 }},
                                 suggestedMin: 0,
-                                suggestedMax: {TOTAL_SOLAR_CAPACITY_KW * 1000}
+                                suggestedMax: {max(max(load_forecast_values) if load_forecast_values else 0, max(solar_forecast_values) if solar_forecast_values else 0) * 1.2}
                             }}
                         }},
                         plugins: {{
@@ -1715,7 +1989,12 @@ def home():
                                         if (label) {{
                                             label += ': ';
                                         }}
-                                        label += Math.round(context.parsed.y) + 'W';
+                                        if (context.dataset.label === 'Net Deficit/Surplus (W)') {{
+                                            const value = Math.round(context.parsed.y);
+                                            label += (value > 0 ? '+' : '') + value + 'W (' + (value > 0 ? 'Battery needed' : 'Solar surplus') + ')';
+                                        }} else {{
+                                            label += Math.round(context.parsed.y) + 'W';
+                                        }}
                                         return label;
                                     }}
                                 }}
@@ -1730,21 +2009,127 @@ def home():
         html += f'''
         <div class="card">
             <div class="chart-container">
-                <h2>🌤️ Solar Generation Forecast</h2>
+                <h2>🔮 Energy Forecast</h2>
                 <div style="text-align: center; padding: 40px 20px; color: #666;">
-                    <p style="margin-bottom: 15px;">⏳ Collecting historical solar data...</p>
-                    <p>Forecast chart will appear when system has collected at least 3 hours of solar generation data.</p>
+                    <p style="margin-bottom: 15px;">⏳ Collecting historical data...</p>
+                    <p>Forecast chart will appear when system has collected at least 3 hours of solar generation and load data.</p>
                     <p style="font-size: 0.9em; opacity: 0.7; margin-top: 20px;">
-                        Current data points: {historical_pattern_count}/3 needed
+                        Solar patterns: {historical_pattern_count}/3 | Load patterns: {load_pattern_count}/3
                     </p>
                 </div>
             </div>
         </div>
         '''
     
+    # Battery Life Prediction Chart
+    if battery_trace and len(battery_trace) > 1:
+        html += f'''
+        <div class="card">
+            <div class="chart-container">
+                <h2>🔋 Battery Life Prediction</h2>
+                <p style="color: #666; margin-bottom: 15px; font-size: 0.95em;">
+                    <strong>Simulation:</strong> Projected battery level based on forecasted demand vs solar production
+                    {' | 🔥 Generator may be needed' if battery_life_prediction and battery_life_prediction.get('will_need_generator') else ' | ✓ Battery should suffice'}
+                </p>
+                <canvas id="batteryLifeChart"></canvas>
+            </div>
+            
+            <script>
+                const batteryCtx = document.getElementById('batteryLifeChart').getContext('2d');
+                new Chart(batteryCtx, {{
+                    type: 'line',
+                    data: {{
+                        labels: {battery_trace_times},
+                        datasets: [
+                            {{
+                                label: 'Projected Battery Level (kWh)',
+                                data: {battery_trace},
+                                borderColor: 'rgb(76, 175, 80)',
+                                backgroundColor: 'rgba(76, 175, 80, 0.1)',
+                                borderWidth: 3,
+                                tension: 0.4,
+                                fill: true,
+                                pointBackgroundColor: function(context) {{
+                                    const index = context.dataIndex;
+                                    const value = context.dataset.data[index];
+                                    return value <= 0 ? 'rgb(235, 51, 73)' : 'rgb(76, 175, 80)';
+                                }},
+                                pointBorderColor: function(context) {{
+                                    const index = context.dataIndex;
+                                    const value = context.dataset.data[index];
+                                    return value <= 0 ? 'rgb(235, 51, 73)' : 'rgb(76, 175, 80)';
+                                }}
+                            }}
+                        ]
+                    }},
+                    options: {{
+                        responsive: true,
+                        interaction: {{
+                            mode: 'index',
+                            intersect: false
+                        }},
+                        scales: {{
+                            y: {{
+                                type: 'linear',
+                                display: true,
+                                title: {{
+                                    display: true,
+                                    text: 'Battery Level (kWh)',
+                                    font: {{ size: 14, weight: 'bold' }}
+                                }},
+                                suggestedMin: 0,
+                                suggestedMax: {PRIMARY_BATTERY_USABLE_WH/1000}
+                            }}
+                        }},
+                        plugins: {{
+                            legend: {{
+                                display: true,
+                                position: 'top'
+                            }},
+                            tooltip: {{
+                                callbacks: {{
+                                    label: function(context) {{
+                                        let label = context.dataset.label || '';
+                                        if (label) {{
+                                            label += ': ';
+                                        }}
+                                        label += context.parsed.y.toFixed(1) + 'kWh';
+                                        if (context.parsed.y <= 0) {{
+                                            label += ' (Depleted)';
+                                        }}
+                                        return label;
+                                    }}
+                                }}
+                            }},
+                            annotation: {{
+                                annotations: {{
+                                    depletionLine: {{
+                                        type: 'line',
+                                        yMin: 0,
+                                        yMax: 0,
+                                        borderColor: 'rgb(235, 51, 73)',
+                                        borderWidth: 2,
+                                        borderDash: [5, 5],
+                                        label: {{
+                                            content: 'Depletion',
+                                            enabled: true,
+                                            position: 'end',
+                                            backgroundColor: 'rgba(235, 51, 73, 0.8)',
+                                            color: 'white'
+                                        }}
+                                    }}
+                                }}
+                            }}
+                        }}
+                    }}
+                }});
+            </script>
+        </div>
+        '''
+    
     html += """
         <div class="footer">
-            10kW Solar System • Cascade Battery Architecture • Solar-Aware Monitoring • Managed by YourHost
+            10kW Solar System • 30kWh Primary (18kWh usable) • 30kWh Backup (5yo, ~21kWh) • LiFePO4 Batteries • Managed by YourHost
         </div>
     </div>
 </body>
