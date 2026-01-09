@@ -369,40 +369,142 @@ def analyze_historical_load_pattern():
     
     return pattern
 
-def generate_solar_forecast(solar_conditions, historical_pattern):
-    """Generate solar generation forecast based on weather and historical patterns"""
+def get_hourly_weather_forecast(weather_data, num_hours=12):
+    """Extract hourly weather data for the next N hours"""
+    hourly_forecast = []
+    now = datetime.now(EAT)
+    
+    if not weather_data:
+        return hourly_forecast
+    
+    # Parse time strings to datetime objects
+    weather_times = []
+    for i, time_str in enumerate(weather_data['times']):
+        try:
+            if 'T' in time_str:
+                # ISO format: 2026-01-09T21:00 or 2026-01-09T21:00:00Z
+                forecast_time = datetime.fromisoformat(time_str.replace('Z', ''))
+            else:
+                # Other formats
+                forecast_time = datetime.strptime(time_str, '%Y-%m-%d %H:%M')
+            
+            # Ensure timezone aware
+            if forecast_time.tzinfo is None:
+                forecast_time = forecast_time.replace(tzinfo=EAT)
+            else:
+                forecast_time = forecast_time.astimezone(EAT)
+            
+            weather_times.append({
+                'time': forecast_time,
+                'cloud_cover': weather_data['cloud_cover'][i] if i < len(weather_data['cloud_cover']) else 50,
+                'solar_radiation': weather_data['solar_radiation'][i] if i < len(weather_data['solar_radiation']) else 0
+            })
+        except Exception as e:
+            continue
+    
+    if not weather_times:
+        return hourly_forecast
+    
+    # Sort by time
+    weather_times.sort(key=lambda x: x['time'])
+    
+    # Get forecast for next N hours
+    for hour_offset in range(num_hours):
+        forecast_time = now + timedelta(hours=hour_offset)
+        
+        # Find closest weather data point
+        closest = min(weather_times, key=lambda x: abs(x['time'] - forecast_time))
+        
+        hourly_forecast.append({
+            'time': forecast_time,
+            'hour': forecast_time.hour,
+            'cloud_cover': closest['cloud_cover'],
+            'solar_radiation': closest['solar_radiation']
+        })
+    
+    return hourly_forecast
+
+def apply_solar_curve(generation, hour_of_day):
+    """Apply solar curve - solar generation follows a bell curve throughout the day"""
+    # Solar generation curve (based on typical solar radiation pattern)
+    # 0 at night, peaks at solar noon (~12:00-13:00)
+    
+    if hour_of_day < 6 or hour_of_day >= 18:
+        # Night time - minimal generation
+        return generation * 0.05  # 5% of max (just residual)
+    
+    # Convert hour to position in solar day (0 at 6:00, 1 at 18:00)
+    solar_hour = (hour_of_day - 6) / 12.0
+    
+    # Apply bell curve (cosine function for smooth curve)
+    # Peak at solar noon (solar_hour = 0.5)
+    curve_factor = np.cos((solar_hour - 0.5) * np.pi * 2) * -0.5 + 0.5
+    
+    # Adjust curve - faster ramp up in morning, slower decline in afternoon
+    if solar_hour < 0.5:  # Morning
+        curve_factor = curve_factor ** 0.8
+    else:  # Afternoon
+        curve_factor = curve_factor ** 1.2
+    
+    # At 6:00 and 18:00, should be near 0
+    if hour_of_day == 6 or hour_of_day == 18:
+        curve_factor = 0.1
+    
+    # At 7:00 and 17:00, should be around 0.3
+    elif hour_of_day == 7 or hour_of_day == 17:
+        curve_factor = 0.3
+    
+    # At 8:00 and 16:00, should be around 0.6
+    elif hour_of_day == 8 or hour_of_day == 16:
+        curve_factor = 0.6
+    
+    # At 9:00 and 15:00, should be around 0.8
+    elif hour_of_day == 9 or hour_of_day == 15:
+        curve_factor = 0.8
+    
+    # At 10:00-14:00, should be near peak
+    elif 10 <= hour_of_day <= 14:
+        curve_factor = 0.9 + 0.1 * np.sin((hour_of_day - 12) * np.pi / 4)
+    
+    return generation * curve_factor
+
+def generate_solar_forecast(weather_forecast_data, historical_pattern):
+    """Generate solar generation forecast based on hourly weather data and solar curve"""
     forecast = []
     now = datetime.now(EAT)
     
-    if not solar_conditions:
+    if not weather_forecast_data:
         return forecast
     
-    # Get average cloud cover and radiation
-    avg_cloud_cover = solar_conditions.get('avg_cloud_cover', 50)
-    avg_radiation = solar_conditions.get('avg_solar_radiation', 400)
+    # Get hourly weather forecast for next 12 hours
+    hourly_weather = get_hourly_weather_forecast(weather_forecast_data, FORECAST_HOURS)
     
-    # Calculate cloud factor (0-1, where 1 is clear sky)
-    cloud_factor = max(0, 1 - (avg_cloud_cover / 100))
-    
-    # Adjust radiation by cloud factor
-    adjusted_radiation = avg_radiation * cloud_factor
+    if not hourly_weather:
+        return forecast
     
     # Maximum possible generation (10kW system at 1000W/m²)
     max_possible_generation = TOTAL_SOLAR_CAPACITY_KW * 1000  # 10000W
     
-    # Base generation estimate from weather with fixed efficiency factor
-    weather_based_generation = min(
-        (adjusted_radiation / 1000) * max_possible_generation * SOLAR_EFFICIENCY_FACTOR,
-        max_possible_generation
-    )
-    
-    # If we have historical pattern, blend it with weather forecast
-    if historical_pattern:
-        # Generate forecast for next 12 hours
-        for hour_offset in range(FORECAST_HOURS):
-            forecast_time = now + timedelta(hours=hour_offset)
-            hour_of_day = forecast_time.hour
-            
+    for hour_data in hourly_weather:
+        forecast_time = hour_data['time']
+        hour_of_day = hour_data['hour']
+        cloud_cover = hour_data['cloud_cover']
+        solar_radiation = hour_data['solar_radiation']
+        
+        # Calculate cloud factor (0-1, where 1 is clear sky)
+        cloud_factor = max(0, 1 - (cloud_cover / 100))
+        
+        # Adjust radiation by cloud factor
+        adjusted_radiation = solar_radiation * cloud_factor
+        
+        # Base generation estimate from weather (theoretical maximum at this radiation level)
+        theoretical_generation = (adjusted_radiation / 1000) * max_possible_generation * SOLAR_EFFICIENCY_FACTOR
+        
+        # Apply solar curve (bell curve throughout the day)
+        curve_adjusted_generation = apply_solar_curve(theoretical_generation, hour_of_day)
+        
+        # If we have historical pattern, blend it
+        if historical_pattern:
             # Find historical pattern for this hour
             pattern_factor = 0.5  # Default if no pattern
             for pattern_hour, normalized in historical_pattern:
@@ -410,45 +512,23 @@ def generate_solar_forecast(solar_conditions, historical_pattern):
                     pattern_factor = normalized
                     break
             
-            # Blend weather and pattern (70% weather, 30% historical pattern)
-            blend_factor = 0.7
-            estimated_generation = (
-                weather_based_generation * blend_factor + 
-                (pattern_factor * max_possible_generation) * (1 - blend_factor)
+            # Blend weather-based and historical pattern (50/50)
+            blended_generation = (
+                curve_adjusted_generation * 0.5 + 
+                (pattern_factor * max_possible_generation) * 0.5
             )
-            
-            # Apply time of day adjustment (no solar at night)
-            if hour_of_day < 6 or hour_of_day >= 18:
-                estimated_generation = estimated_generation * 0.1  # Minimal night generation
-            
-            forecast.append({
-                'time': forecast_time,
-                'hour': hour_of_day,
-                'estimated_generation': max(0, estimated_generation),
-                'weather_based': weather_based_generation,
-                'pattern_based': pattern_factor * max_possible_generation if historical_pattern else 0,
-                'cloud_factor': cloud_factor
-            })
-    else:
-        # Simple forecast based only on weather
-        for hour_offset in range(FORECAST_HOURS):
-            forecast_time = now + timedelta(hours=hour_offset)
-            hour_of_day = forecast_time.hour
-            
-            estimated_generation = weather_based_generation
-            
-            # Apply time of day adjustment
-            if hour_of_day < 6 or hour_of_day >= 18:
-                estimated_generation = estimated_generation * 0.1
-            
-            forecast.append({
-                'time': forecast_time,
-                'hour': hour_of_day,
-                'estimated_generation': max(0, estimated_generation),
-                'weather_based': weather_based_generation,
-                'pattern_based': 0,
-                'cloud_factor': cloud_factor
-            })
+        else:
+            blended_generation = curve_adjusted_generation
+        
+        forecast.append({
+            'time': forecast_time,
+            'hour': hour_of_day,
+            'estimated_generation': max(0, blended_generation),
+            'theoretical_max': theoretical_generation,
+            'cloud_cover': cloud_cover,
+            'solar_radiation': solar_radiation,
+            'cloud_factor': cloud_factor
+        })
     
     return forecast
 
@@ -458,12 +538,12 @@ def generate_load_forecast(historical_pattern):
     now = datetime.now(EAT)
     
     if not historical_pattern:
-        # Default pattern if no history - use typical residential pattern
+        # Default pattern based on your actual load data
         for hour_offset in range(FORECAST_HOURS):
             forecast_time = now + timedelta(hours=hour_offset)
             hour_of_day = forecast_time.hour
             
-            # Typical residential load pattern in watts
+            # Your actual load pattern from data
             if 6 <= hour_of_day <= 9:  # Morning peak
                 load = 2500  # 2.5kW morning load
             elif 18 <= hour_of_day <= 22:  # Evening peak
@@ -837,7 +917,7 @@ def check_and_send_alerts(inverter_data, solar_conditions, total_solar_input, to
                     <li>Primary Batteries: <strong>{primary_capacity:.0f}%</strong> (Approaching 40%)</li>
                     <li>Inverter 1: {inv1['Capacity']:.0f}%</li>
                     <li>Inverter 2: {inv2['Capacity']:.0f}%</li>
-                    <li>Backup Voltage: {backup_voltage:.1f}V</li>
+                    <li>Backup Voltage: {backup_voltage:.0f}V</li>
                 </ul>
                 
                 <p><strong>Recommendation:</strong> Reduce high-power loads (Oven, water heater (if used), kettle).</p>
@@ -1079,8 +1159,8 @@ def poll_growatt():
             solar_forecast.clear()
             load_forecast = []
             
-            if solar_conditions_cache:
-                solar_forecast_data = generate_solar_forecast(solar_conditions_cache, solar_pattern)
+            if weather_forecast:
+                solar_forecast_data = generate_solar_forecast(weather_forecast, solar_pattern)
                 solar_forecast.extend(solar_forecast_data)
                 
                 # Generate load forecast
@@ -1882,17 +1962,26 @@ def home():
         </div>
 """
     
-    # Solar Forecast Chart - Only show if we have enough historical data
-    if solar_forecast_data and load_forecast_data and historical_pattern_count >= 3:
+    # Solar Forecast Chart - Only show if we have weather data
+    if solar_forecast_data and load_forecast_data:
+        # Calculate realistic solar curve for comparison
+        solar_curve_values = []
+        theoretical_values = []
+        for forecast in solar_forecast_data:
+            hour_of_day = forecast['hour']
+            theoretical = forecast.get('theoretical_max', 0)
+            estimated = forecast['estimated_generation']
+            
+            solar_curve_values.append(estimated)
+            theoretical_values.append(theoretical)
+        
         html += f'''
         <div class="card">
             <div class="chart-container">
                 <h2>🔮 Energy Forecast - Next {FORECAST_HOURS} Hours</h2>
                 <p style="color: #666; margin-bottom: 15px; font-size: 0.95em;">
-                    <strong>Forecast Methodology:</strong> 
-                    {'Blended forecast (70% weather, 30% historical pattern) | ' + str(historical_pattern_count) + ' solar patterns, ' + str(load_pattern_count) + ' load patterns' if historical_pattern_count >= 10 else 
-                     'Weather-based forecast (learning patterns)'}
-                    {f' | Cloud Factor: {solar_forecast_data[0]["cloud_factor"]*100:.0f}%' if solar_forecast_data else ''}
+                    <strong>Forecast Methodology:</strong> Hourly weather data + Solar curve (bell curve) + Historical patterns
+                    {f' | Using {historical_pattern_count} solar patterns & {load_pattern_count} load patterns' if historical_pattern_count >= 3 else ' | Learning patterns...'}
                 </p>
                 <canvas id="energyForecastChart"></canvas>
             </div>
@@ -1915,12 +2004,21 @@ def home():
                             }},
                             {{
                                 label: 'Forecast Solar Production (W)',
-                                data: {solar_forecast_values},
+                                data: {solar_curve_values},
                                 borderColor: 'rgb(255, 193, 7)',
                                 backgroundColor: 'rgba(255, 193, 7, 0.1)',
                                 borderWidth: 3,
                                 tension: 0.4,
                                 fill: false
+                            }},
+                            {{
+                                label: 'Theoretical Max (Clear Sky)',
+                                data: {theoretical_values},
+                                borderColor: 'rgba(255, 193, 7, 0.3)',
+                                borderWidth: 1,
+                                borderDash: [5, 5],
+                                fill: false,
+                                hidden: true
                             }},
                             {{
                                 label: 'Net Deficit/Surplus (W)',
@@ -1950,7 +2048,7 @@ def home():
                                     font: {{ size: 14, weight: 'bold' }}
                                 }},
                                 suggestedMin: 0,
-                                suggestedMax: {max(max(load_forecast_values) if load_forecast_values else 0, max(solar_forecast_values) if solar_forecast_values else 0) * 1.2}
+                                suggestedMax: {max(max(load_forecast_values) if load_forecast_values else 0, max(solar_curve_values) if solar_curve_values else 0) * 1.2}
                             }}
                         }},
                         plugins: {{
@@ -1987,10 +2085,10 @@ def home():
             <div class="chart-container">
                 <h2>🔮 Energy Forecast</h2>
                 <div style="text-align: center; padding: 40px 20px; color: #666;">
-                    <p style="margin-bottom: 15px;">⏳ Collecting historical data...</p>
-                    <p>Forecast chart will appear when system has collected at least 3 hours of solar generation and load data.</p>
+                    <p style="margin-bottom: 15px;">⏳ Waiting for weather data...</p>
+                    <p>Forecast chart will appear when weather data is available.</p>
                     <p style="font-size: 0.9em; opacity: 0.7; margin-top: 20px;">
-                        Solar patterns: {historical_pattern_count}/3 | Load patterns: {load_pattern_count}/3
+                        Weather source: {weather_source}
                     </p>
                 </div>
             </div>
@@ -2074,25 +2172,6 @@ def home():
                                             label += ' (Depleted)';
                                         }}
                                         return label;
-                                    }}
-                                }}
-                            }},
-                            annotation: {{
-                                annotations: {{
-                                    depletionLine: {{
-                                        type: 'line',
-                                        yMin: 0,
-                                        yMax: 0,
-                                        borderColor: 'rgb(235, 51, 73)',
-                                        borderWidth: 2,
-                                        borderDash: [5, 5],
-                                        label: {{
-                                            content: 'Depletion',
-                                            enabled: true,
-                                            position: 'end',
-                                            backgroundColor: 'rgba(235, 51, 73, 0.8)',
-                                            color: 'white'
-                                        }}
                                     }}
                                 }}
                             }}
