@@ -519,7 +519,10 @@ def check_and_send_alerts(inverter_data, solar_conditions, total_solar_input, to
 def poll_growatt():
     global latest_data, load_history, battery_history, weather_forecast, last_communication
     
-    last_weather_update = None
+    # Fetch weather immediately on startup
+    print("🌤️ Fetching initial weather forecast...")
+    weather_forecast = get_weather_forecast()
+    last_weather_update = datetime.now(EAT) if weather_forecast else None
     
     while True:
         try:
@@ -709,8 +712,15 @@ def home():
     load_values = [p for t, p in load_history]
     battery_values = [p for t, p in battery_history]
     
-    # Solar conditions
+    # Solar conditions - with fallback
     solar_conditions = analyze_solar_conditions(weather_forecast)
+    
+    # Debug: Check if weather forecast is available
+    if not weather_forecast:
+        print("⚠️ Weather forecast not yet available for dashboard")
+    if not solar_conditions:
+        print("⚠️ Solar conditions could not be analyzed")
+    
     
     html = f"""
 <!DOCTYPE html>
@@ -1066,6 +1076,15 @@ def home():
                 <p><strong>{period}:</strong> Cloud Cover: {solar_conditions['avg_cloud_cover']:.0f}% | Solar Radiation: {solar_conditions['avg_solar_radiation']:.0f} W/m²</p>
                 {'<p>⚠️ Limited recharge expected. Monitor battery levels closely.</p>' if solar_conditions['poor_conditions'] else '<p>✓ Batteries should recharge well during daylight hours.</p>'}
                 {f'<p style="font-size: 0.9em; opacity: 0.8;">🌙 Currently nighttime - analyzing tomorrow\'s solar potential</p>' if is_night else ''}
+            </div>
+"""
+    else:
+        # Show fallback when weather data is not available yet
+        html += """
+            <div class="weather-alert good">
+                <h3>🌤️ Weather Forecast</h3>
+                <p>Loading weather data... Forecast will appear shortly.</p>
+                <p style="font-size: 0.9em; opacity: 0.8;">Weather updates every 30 minutes</p>
             </div>
 """
     
