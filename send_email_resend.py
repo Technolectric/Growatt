@@ -3,6 +3,7 @@ import time
 import json
 import requests
 import traceback
+import random
 from datetime import datetime, timedelta, timezone
 from threading import Thread
 from flask import Flask, render_template_string, request, jsonify
@@ -21,7 +22,7 @@ SERIAL_NUMBERS = os.getenv("SERIAL_NUMBERS", "").split(",")
 POLL_INTERVAL_MINUTES = int(os.getenv("POLL_INTERVAL_MINUTES", 5))
 
 # ----------------------------
-# Inverter Configuration (Display order: 1, 2, 3)
+# Inverter Configuration
 # ----------------------------
 INVERTER_CONFIG = {
     "RKG3B0400T": {"label": "Inverter 1", "type": "primary", "datalog": "DDD0B021CC", "display_order": 1},
@@ -30,22 +31,16 @@ INVERTER_CONFIG = {
 }
 
 # Alert thresholds
-PRIMARY_BATTERY_THRESHOLD = 40  # When backup kicks in
-BACKUP_VOLTAGE_THRESHOLD = 51.2  # When generator starts
+PRIMARY_BATTERY_THRESHOLD = 40
+BACKUP_VOLTAGE_THRESHOLD = 51.2
 TOTAL_SOLAR_CAPACITY_KW = 10
-PRIMARY_INVERTER_CAPACITY_W = 10000  # 10kW combined
-BACKUP_INVERTER_CAPACITY_W = 5000    # 5kW
-
-# Backup battery voltage status thresholds
-BACKUP_VOLTAGE_GOOD = 53.0   # Good status
-BACKUP_VOLTAGE_MEDIUM = 52.3  # Medium status  
-BACKUP_VOLTAGE_LOW = 52.0     # Low status
-
-# Temperature thresholds
-INVERTER_TEMP_WARNING = 60  # °C
-INVERTER_TEMP_CRITICAL = 70  # °C
-
-# Communication timeout
+PRIMARY_INVERTER_CAPACITY_W = 10000
+BACKUP_INVERTER_CAPACITY_W = 5000
+BACKUP_VOLTAGE_GOOD = 53.0
+BACKUP_VOLTAGE_MEDIUM = 52.3
+BACKUP_VOLTAGE_LOW = 52.0
+INVERTER_TEMP_WARNING = 60
+INVERTER_TEMP_CRITICAL = 70
 COMMUNICATION_TIMEOUT_MINUTES = 10
 
 # ----------------------------
@@ -88,24 +83,53 @@ weather_debug = {
 EAT = timezone(timedelta(hours=3))
 
 # ----------------------------
-# Weather Functions (Robust Caching & 429 Handling)
+# Weather Functions (Robust Caching & Fallback)
 # ----------------------------
+def generate_fallback_forecast():
+    """Generate synthetic weather data when API is rate limited"""
+    print("⚠️ Generating synthetic weather data (Fallback Mode)")
+    times = []
+    cloud_cover = []
+    solar_radiation = []
+    direct_radiation = []
+    
+    now = datetime.now(timezone.utc)
+    for i in range(48):
+        t = now + timedelta(hours=i)
+        times.append(t.strftime("%Y-%m-%dT%H:00"))
+        # Assume "Average" conditions for safety (50% cloud, moderate sun)
+        cloud_cover.append(50) 
+        
+        # Simple day/night logic for radiation
+        hour_eat = (t.hour + 3) % 24
+        if 7 <= hour_eat <= 17:
+            solar_radiation.append(500) # Moderate sun
+            direct_radiation.append(300)
+        else:
+            solar_radiation.append(0)
+            direct_radiation.append(0)
+            
+    return {
+        'times': times,
+        'cloud_cover': cloud_cover,
+        'solar_radiation': solar_radiation,
+        'direct_radiation': direct_radiation
+    }
+
 def load_weather_cache():
-    """Load weather from local JSON file to prevent API spam on restart"""
+    """Load weather from local JSON file"""
     try:
         if os.path.exists(WEATHER_CACHE_FILE):
             with open(WEATHER_CACHE_FILE, 'r') as f:
                 data = json.load(f)
             
-            # Check if cache is valid (less than 2 hours old)
+            # Check if cache is valid (less than 3 hours old)
             cached_time = datetime.fromisoformat(data['timestamp'])
-            if datetime.now(EAT) - cached_time < timedelta(hours=2):
+            if datetime.now(EAT) - cached_time < timedelta(hours=3):
                 print(f"✓ Loaded valid weather cache from {data['timestamp']}")
                 return data['forecast']
-            else:
-                print("ℹ️ Weather cache expired")
     except Exception as e:
-        print(f"ℹ️ Cache load failed (normal on first run): {e}")
+        print(f"ℹ️ Cache load failed: {e}")
     return None
 
 def save_weather_cache(forecast):
@@ -117,12 +141,11 @@ def save_weather_cache(forecast):
         }
         with open(WEATHER_CACHE_FILE, 'w') as f:
             json.dump(data, f)
-        print("✓ Weather cache saved to disk")
     except Exception as e:
         print(f"⚠️ Failed to save weather cache: {e}")
 
 def get_weather_forecast():
-    """Get weather forecast with 429 protection and caching"""
+    """Get weather forecast with 429 protection, caching, and synthetic fallback"""
     global weather_debug, weather_cooldown_until
     
     now = datetime.now(EAT)
@@ -135,18 +158,22 @@ def get_weather_forecast():
         weather_debug["status"] = "Rate Limited (429)"
         weather_debug["error"] = msg
         
-        # Try to return cached data if API is blocked
-        return load_weather_cache()
+        # Try cache, then fallback
+        cache = load_weather_cache()
+        if cache:
+            weather_debug["source"] = "Cache (Disk)"
+            return cache
+        
+        weather_debug["source"] = "Estimated (Fallback)"
+        return generate_fallback_forecast()
 
-    # 2. Headers to look like a browser
+    # 2. Headers
     weather_headers = {
         "User-Agent": "Mozilla/5.0 (compatible; SolarMonitor/1.0; +http://tulia.house)",
-        "Accept": "application/json",
-        "Accept-Encoding": "gzip, deflate"
+        "Accept": "application/json"
     }
     
     url = f"https://api.open-meteo.com/v1/forecast?latitude={LATITUDE}&longitude={LONGITUDE}&hourly=cloud_cover,shortwave_radiation,direct_radiation&timezone=Africa/Nairobi&forecast_days=2"
-    fallback_url = f"https://api.open-meteo.com/v1/forecast?latitude={LATITUDE}&longitude={LONGITUDE}&hourly=cloud_cover,shortwave_radiation,direct_radiation&forecast_days=2"
     
     weather_debug["last_attempt"] = now.strftime("%H:%M:%S")
     
@@ -154,34 +181,27 @@ def get_weather_forecast():
         print(f"🌤️ Requesting weather data...")
         weather_debug["url_used"] = url
         
-        # Attempt 1: Primary URL
-        try:
-            response = requests.get(url, headers=weather_headers, timeout=20)
-            response.raise_for_status()
-        except requests.exceptions.HTTPError as e:
-            # CRITICAL: Handle 429 specifically
-            if e.response.status_code == 429:
-                print("⛔ 429 TOO MANY REQUESTS - Stopping retries for 60 mins")
-                weather_cooldown_until = now + timedelta(minutes=60)
-                weather_debug["error"] = "HTTP 429: Too Many Requests (Cooling Down)"
-                weather_debug["status"] = "Rate Limited"
-                return load_weather_cache() # Return cache if possible
-            raise e # Re-raise other errors to trigger fallback
+        response = requests.get(url, headers=weather_headers, timeout=20)
+        
+        # Handle 429 specifically
+        if response.status_code == 429:
+            print("⛔ 429 TOO MANY REQUESTS - Activating Safe Mode")
+            weather_cooldown_until = now + timedelta(minutes=60)
+            weather_debug["error"] = "HTTP 429: Too Many Requests"
+            weather_debug["status"] = "Rate Limited"
             
-        except Exception as e:
-            print(f"⚠️ Primary weather fetch failed: {e}. Trying fallback...")
-            weather_debug["error"] = f"Primary failed: {str(e)}"
+            # Try cache, then fallback
+            cache = load_weather_cache()
+            if cache:
+                weather_debug["source"] = "Cache (Disk)"
+                return cache
             
-            # Attempt 2: Fallback URL
-            weather_debug["url_used"] = fallback_url
-            response = requests.get(fallback_url, headers=weather_headers, timeout=20)
-            response.raise_for_status()
-
+            weather_debug["source"] = "Estimated (Fallback)"
+            return generate_fallback_forecast()
+            
+        response.raise_for_status()
         data = response.json()
         
-        if 'hourly' not in data:
-            raise ValueError("Invalid API response: 'hourly' key missing")
-
         forecast = {
             'times': data['hourly']['time'],
             'cloud_cover': data['hourly']['cloud_cover'],
@@ -189,24 +209,28 @@ def get_weather_forecast():
             'direct_radiation': data['hourly']['direct_radiation']
         }
         
-        print(f"✓ Weather forecast updated: {len(forecast['times'])} hours data")
+        print(f"✓ Weather forecast updated")
         weather_debug["status"] = "Success"
         weather_debug["error"] = None
-        weather_debug["source"] = "API"
+        weather_debug["source"] = "API (Live)"
         
-        # Save to cache
         save_weather_cache(forecast)
-        
         return forecast
         
     except Exception as e:
         error_msg = f"{type(e).__name__}: {str(e)}"
-        print(f"✗ Weather fetch completely failed: {error_msg}")
+        print(f"✗ Weather fetch failed: {error_msg}")
         weather_debug["status"] = "Failed"
         weather_debug["error"] = error_msg
         
-        # Fallback to disk cache if API fails completely
-        return load_weather_cache()
+        # Try cache, then fallback
+        cache = load_weather_cache()
+        if cache:
+            weather_debug["source"] = "Cache (Disk)"
+            return cache
+            
+        weather_debug["source"] = "Estimated (Fallback)"
+        return generate_fallback_forecast()
 
 def analyze_solar_conditions(forecast):
     """Analyze upcoming solar conditions"""
@@ -239,7 +263,7 @@ def analyze_solar_conditions(forecast):
                 forecast_time = datetime.fromisoformat(clean_time)
                 
                 if forecast_time.tzinfo is None:
-                    # If using fallback URL (UTC), adjust to EAT
+                    # If using fallback/UTC, adjust to EAT
                     if "Africa/Nairobi" not in weather_debug.get("url_used", ""):
                         forecast_time = forecast_time.replace(tzinfo=timezone.utc).astimezone(EAT)
                     else:
@@ -385,11 +409,9 @@ def check_and_send_alerts(inverter_data, solar_conditions, total_solar_input, to
 def poll_growatt():
     global latest_data, load_history, battery_history, weather_forecast, last_communication
     
-    # 1. Try to load cache first
+    # Initial load
     print("🌤️ Loading initial weather...")
     weather_forecast = load_weather_cache()
-    
-    # 2. If no cache, try fetch (unless rate limited)
     if not weather_forecast:
         weather_forecast = get_weather_forecast()
         
@@ -401,10 +423,8 @@ def poll_growatt():
             should_update_weather = False
             now = datetime.now(EAT)
             
-            # If we have no data, try every loop (unless cooldown active)
             if weather_forecast is None:
                 should_update_weather = True
-            # If we have data, only update every 45 mins to be safe
             elif last_weather_update and (now - last_weather_update > timedelta(minutes=45)):
                 should_update_weather = True
                 
@@ -507,10 +527,8 @@ def poll_growatt():
 # ----------------------------
 @app.route("/refresh_weather")
 def refresh_weather():
-    """Manual trigger to refresh weather"""
     global weather_forecast, weather_cooldown_until
-    # Reset cooldown on manual force
-    weather_cooldown_until = None
+    weather_cooldown_until = None # Reset cooldown
     weather_forecast = get_weather_forecast()
     return jsonify(weather_debug)
 
@@ -560,7 +578,7 @@ def home():
         .weather-alert {{ padding: 20px; border-radius: 10px; margin-bottom: 20px; color: white; }}
         .weather-alert.good {{ background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%); }}
         .weather-alert.poor {{ background: linear-gradient(135deg, #f77f00 0%, #fcbf49 100%); }}
-        .weather-alert.error {{ background: linear-gradient(135deg, #757F9A 0%, #D7DDE8 100%); color: #333; border-left: 5px solid #dc3545; }}
+        .weather-alert.estimated {{ background: linear-gradient(135deg, #f77f00 0%, #fcbf49 100%); border-left: 5px solid #d35400; }}
         .metrics-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 15px; margin-bottom: 30px; }}
         .metric {{ padding: 20px; border-radius: 10px; color: white; box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2); }}
         .metric.green {{ background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%); }}
@@ -573,7 +591,6 @@ def home():
         .inverter-card {{ background: white; padding: 20px; border-radius: 10px; border-left: 5px solid #667eea; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }}
         .inverter-card.backup {{ border-left-color: #f77f00; background: #fff9f0; }}
         .inverter-card.offline {{ border-left-color: #dc3545; background: #fff0f0; }}
-        .retry-btn {{ background: #667eea; color: white; border: none; padding: 8px 15px; border-radius: 5px; cursor: pointer; margin-top: 10px; }}
         .footer {{ text-align: center; color: white; margin-top: 30px; font-size: 0.9em; text-shadow: 1px 1px 3px rgba(0,0,0,0.5); }}
     </style>
 </head>
@@ -593,13 +610,17 @@ def home():
 """
     
     if solar_conditions:
-        alert_class = "poor" if solar_conditions['poor_conditions'] else "good"
+        is_estimated = "Estimated" in weather_debug.get('source', '')
+        alert_class = "estimated" if is_estimated else ("poor" if solar_conditions['poor_conditions'] else "good")
         period = solar_conditions.get('analysis_period', 'Next 10 Hours')
+        
+        title = "⚠️ Weather API Rate Limited - Using Estimated Data" if is_estimated else ('☁️ Poor Solar Conditions Ahead' if solar_conditions['poor_conditions'] else '☀️ Good Solar Conditions Expected')
+        
         html += f"""
             <div class="weather-alert {alert_class}">
-                <h3>{'☁️ Poor Solar Conditions Ahead' if solar_conditions['poor_conditions'] else '☀️ Good Solar Conditions Expected'}</h3>
+                <h3>{title}</h3>
                 <p><strong>{period}:</strong> Cloud Cover: {solar_conditions['avg_cloud_cover']:.0f}% | Solar: {solar_conditions['avg_solar_radiation']:.0f} W/m²</p>
-                <p style="font-size:0.8em; margin-top:5px;">Source: {weather_debug.get('source', 'Unknown')}</p>
+                <p style="font-size:0.8em; margin-top:5px; opacity:0.9;">Source: {weather_debug.get('source', 'Unknown')}</p>
             </div>
 """
     else:
@@ -608,8 +629,6 @@ def home():
                 <h3>⚠️ Weather Data Unavailable</h3>
                 <p><strong>Status:</strong> {weather_debug['status']}</p>
                 <p><strong>Error:</strong> {weather_debug['error']}</p>
-                <p><strong>Last Attempt:</strong> {weather_debug['last_attempt']}</p>
-                <button class="retry-btn" onclick="fetch('/refresh_weather').then(r => window.location.reload())">🔄 Force Retry (Resets Cooldown)</button>
             </div>
 """
     
