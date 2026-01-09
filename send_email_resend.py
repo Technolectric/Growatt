@@ -75,6 +75,7 @@ load_history = []
 battery_history = []
 weather_forecast = {}
 weather_source = "Initializing..."  # Track which weather service is working
+solar_conditions_cache = None  # Cache analyzed solar conditions
 alert_history = []
 last_communication = {}  # Track last successful communication per inverter
 
@@ -637,18 +638,22 @@ def check_and_send_alerts(inverter_data, solar_conditions, total_solar_input, to
 # Growatt Polling Loop
 # ----------------------------
 def poll_growatt():
-    global latest_data, load_history, battery_history, weather_forecast, last_communication
+    global latest_data, load_history, battery_history, weather_forecast, last_communication, solar_conditions_cache
     
     # Fetch weather immediately on startup
     print("🌤️ Fetching initial weather forecast...")
     weather_forecast = get_weather_forecast()
+    if weather_forecast:
+        solar_conditions_cache = analyze_solar_conditions(weather_forecast)
     last_weather_update = datetime.now(EAT) if weather_forecast else None
     
     while True:
         try:
-            # Update weather every 30 minutes
+            # Update weather forecast every 30 minutes
             if last_weather_update is None or datetime.now(EAT) - last_weather_update > timedelta(minutes=30):
                 weather_forecast = get_weather_forecast()
+                if weather_forecast:
+                    solar_conditions_cache = analyze_solar_conditions(weather_forecast)
                 last_weather_update = datetime.now(EAT)
             
             total_output_power = 0
@@ -798,9 +803,8 @@ def poll_growatt():
             
             print(f"{latest_data['timestamp']} | Load={total_output_power:.0f}W | Solar={total_solar_input_W:.0f}W | Battery Discharge={total_battery_discharge_W:.0f}W | Primary={primary_battery_min:.0f}% | Backup={backup_battery_voltage:.1f}V | Gen={'ON' if generator_running else 'OFF'}")
             
-            # Check alerts with solar-aware logic
-            solar_conditions = analyze_solar_conditions(weather_forecast)
-            check_and_send_alerts(inverter_data, solar_conditions, total_solar_input_W, total_battery_discharge_W, generator_running)
+            # Check alerts with solar-aware logic (use cached solar_conditions)
+            check_and_send_alerts(inverter_data, solar_conditions_cache, total_solar_input_W, total_battery_discharge_W, generator_running)
         
         except Exception as e:
             print(f"❌ Error in polling loop: {e}")
@@ -832,14 +836,8 @@ def home():
     load_values = [p for t, p in load_history]
     battery_values = [p for t, p in battery_history]
     
-    # Solar conditions - with fallback
-    solar_conditions = analyze_solar_conditions(weather_forecast)
-    
-    # Debug: Check if weather forecast is available
-    if not weather_forecast:
-        print("⚠️ Weather forecast not yet available for dashboard")
-    if not solar_conditions:
-        print("⚠️ Solar conditions could not be analyzed")
+    # Use cached solar conditions (calculated in polling loop)
+    solar_conditions = solar_conditions_cache
     
     
     html = f"""
