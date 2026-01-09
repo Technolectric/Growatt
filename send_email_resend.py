@@ -1213,3 +1213,235 @@ def home():
                     <div class="metric-value">{total_battery_discharge:.0f}W</div>
                     <div class="metric-subtext">From Battery</div>
                 </div>
+                
+                <div class="metric {'green' if generator_running else 'orange' if backup_active else 'green'}">
+                    <div class="metric-label">Generator</div>
+                    <div class="metric-value">{'ON' if generator_running else 'OFF'}</div>
+                    <div class="metric-subtext">{'Running' if generator_running else 'Standby'}</div>
+                </div>
+            </div>
+            
+            <h2>Inverter Details</h2>
+            <div class="inverter-grid">
+"""
+    
+    # Display inverters (already sorted by display_order in polling loop)
+    for inv in latest_data.get("inverters", []):
+        is_backup = inv.get('Type') == 'backup'
+        is_offline = inv.get('communication_lost', False)
+        label = inv.get('Label', 'Unknown')
+        sn = inv.get('SN', 'N/A')
+        datalog = inv.get('DataLog', 'N/A')
+        
+        card_class = 'offline' if is_offline else ('backup' if is_backup else '')
+        
+        html += f"""
+                <div class="inverter-card {card_class}">
+                    <h3>{label}</h3>
+                    <div class="inv-label">{sn} ({datalog})</div>
+"""
+        
+        if is_offline:
+            html += f"""
+                    <div style="color: #dc3545; padding: 10px; background: #fff0f0; border-radius: 5px; margin-bottom: 10px;">
+                        <strong>⚠️ COMMUNICATION LOST</strong><br>
+                        Last seen: {inv.get('last_seen', 'Unknown')}
+                    </div>
+"""
+        else:
+            # Show normal stats
+            temp = inv.get('temperature', 0)
+            temp_class = 'temp-critical' if temp >= INVERTER_TEMP_CRITICAL else ('temp-warning' if temp >= INVERTER_TEMP_WARNING else '')
+            
+            html += f"""
+                    <div class="inv-stat">
+                        <span class="inv-stat-label">Battery {'Voltage' if is_backup else 'Capacity'}</span>
+                        <span class="inv-stat-value">{'%.1fV' % inv.get('vBat', 0) if is_backup else '%.0f%%' % inv.get('Capacity', 0)}</span>
+                    </div>
+"""
+            if not is_backup:
+                html += f"""
+                    <div class="inv-stat">
+                        <span class="inv-stat-label">Battery Voltage</span>
+                        <span class="inv-stat-value">{inv.get('vBat', 0):.1f}V</span>
+                    </div>
+"""
+            
+            html += f"""
+                    <div class="inv-stat">
+                        <span class="inv-stat-label">Output Power</span>
+                        <span class="inv-stat-value">{inv.get('OutputPower', 0):.0f}W</span>
+                    </div>
+                    <div class="inv-stat">
+                        <span class="inv-stat-label">Battery Power</span>
+                        <span class="inv-stat-value">{inv.get('pBat', 0):.0f}W</span>
+                    </div>
+                    <div class="inv-stat">
+                        <span class="inv-stat-label">Solar Input</span>
+                        <span class="inv-stat-value">{(inv.get('ppv', 0) + inv.get('ppv2', 0)):.0f}W</span>
+                    </div>
+                    <div class="inv-stat">
+                        <span class="inv-stat-label">Temperature</span>
+                        <span class="inv-stat-value {temp_class}">{temp:.1f}°C</span>
+                    </div>
+                    <div class="inv-stat">
+                        <span class="inv-stat-label">Status</span>
+                        <span class="inv-stat-value">{inv.get('Status', 'Unknown')}</span>
+                    </div>
+"""
+            
+            if inv.get('has_fault'):
+                fault_info = inv.get('fault_info', {})
+                html += f"""
+                    <div style="color: #dc3545; padding: 10px; background: #fff0f0; border-radius: 5px; margin-top: 10px;">
+                        <strong>⚠️ FAULT DETECTED</strong><br>
+                        Error: {fault_info.get('errorCode', 0)} | Fault: {fault_info.get('faultCode', 0)}
+                    </div>
+"""
+        
+        html += """
+                </div>
+"""
+    
+    html += """
+            </div>
+        </div>
+        
+        <meta http-equiv="refresh" content="300">
+"""
+    
+    # Alert History Section
+    if alert_history:
+        html += """
+        <div class="card">
+            <h2>📧 Alert History - Last 12 Hours</h2>
+            <div class="alert-history">
+"""
+        
+        def get_alert_badge(alert_type):
+            badges = {
+                "critical": ("🔴", "Critical", "#dc3545"),
+                "very_high_load": ("🔴", "Very High Discharge", "#dc3545"),
+                "backup_active": ("🟠", "Backup Active", "#ff9800"),
+                "high_load": ("🟠", "High Discharge", "#ff9800"),
+                "warning": ("🟡", "Warning", "#ffc107"),
+                "moderate_load": ("🔵", "Moderate Discharge", "#2196F3"),
+                "communication_lost": ("⚠️", "Comm Lost", "#ff9800"),
+                "fault_alarm": ("🚨", "Fault", "#dc3545"),
+                "high_temperature": ("🌡️", "High Temp", "#ff9800"),
+                "test": ("⚪", "Test", "#9e9e9e"),
+                "general": ("⚪", "Info", "#9e9e9e")
+            }
+            return badges.get(alert_type, ("⚪", "Unknown", "#9e9e9e"))
+        
+        for alert in reversed(alert_history):
+            icon, badge_text, color = get_alert_badge(alert['type'])
+            time_str = alert['timestamp'].strftime("%H:%M:%S")
+            date_str = alert['timestamp'].strftime("%Y-%m-%d")
+            
+            html += f"""
+                <div class="alert-item">
+                    <div class="alert-time">{date_str} {time_str}</div>
+                    <div class="alert-badge" style="background: {color};">{icon} {badge_text}</div>
+                    <div class="alert-subject">{alert['subject']}</div>
+                </div>
+"""
+        
+        html += """
+            </div>
+        </div>
+"""
+    else:
+        html += """
+        <div class="card">
+            <h2>📧 Alert History - Last 12 Hours</h2>
+            <div class="alert-history">
+                <p style="text-align: center; color: #666; padding: 20px;">
+                    ✓ No alerts sent in the last 12 hours
+                </p>
+            </div>
+        </div>
+"""
+    
+    html += """
+        <div class="card">
+            <div class="chart-container">
+                <h2>Power Monitoring - Last 12 Hours</h2>
+                <canvas id="powerChart"></canvas>
+            </div>
+            
+            <script>
+                const ctx = document.getElementById('powerChart').getContext('2d');
+                new Chart(ctx, {
+                    type: 'line',
+                    data: {
+                        labels: """ + str(times) + """,
+                        datasets: [
+                            {
+                                label: 'Total Load (W)',
+                                data: """ + str(load_values) + """,
+                                borderColor: 'rgb(102, 126, 234)',
+                                backgroundColor: 'rgba(102, 126, 234, 0.1)',
+                                borderWidth: 3,
+                                tension: 0.4,
+                                fill: true
+                            },
+                            {
+                                label: 'Battery Discharge (W)',
+                                data: """ + str(battery_values) + """,
+                                borderColor: 'rgb(235, 51, 73)',
+                                backgroundColor: 'rgba(235, 51, 73, 0.1)',
+                                borderWidth: 3,
+                                tension: 0.4,
+                                fill: true
+                            }
+                        ]
+                    },
+                    options: {
+                        responsive: true,
+                        interaction: {
+                            mode: 'index',
+                            intersect: false
+                        },
+                        scales: {
+                            y: {
+                                type: 'linear',
+                                display: true,
+                                title: {
+                                    display: true,
+                                    text: 'Power (W)',
+                                    font: { size: 14, weight: 'bold' }
+                                }
+                            }
+                        },
+                        plugins: {
+                            legend: {
+                                display: true,
+                                position: 'top'
+                            }
+                        }
+                    }
+                });
+            </script>
+        </div>
+        
+        <div class="footer">
+            10kW Solar System • Cascade Battery Architecture • Solar-Aware Monitoring • Managed by YourHost
+        </div>
+    </div>
+</body>
+</html>
+"""
+    
+    return render_template_string(html)
+
+# ----------------------------
+# Start background polling thread
+# ----------------------------
+Thread(target=poll_growatt, daemon=True).start()
+
+# ----------------------------
+# Run Flask
+# ----------------------------
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
