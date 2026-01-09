@@ -1064,7 +1064,7 @@ def home():
             </div>
 """
     
-    # Weather alert
+    # Weather alert - ALWAYS SHOW with debug info
     if solar_conditions:
         alert_class = "poor" if solar_conditions['poor_conditions'] else "good"
         period = solar_conditions.get('analysis_period', 'Next 10 Hours')
@@ -1079,12 +1079,14 @@ def home():
             </div>
 """
     else:
-        # Show fallback when weather data is not available yet
-        html += """
+        # Debug: Show why weather is not available
+        weather_debug = "Weather API not responding" if not weather_forecast else "Could not analyze solar conditions"
+        html += f"""
             <div class="weather-alert good">
                 <h3>🌤️ Weather Forecast</h3>
-                <p>Loading weather data... Forecast will appear shortly.</p>
-                <p style="font-size: 0.9em; opacity: 0.8;">Weather updates every 30 minutes</p>
+                <p><strong>Status:</strong> {weather_debug}</p>
+                <p>Trying to fetch weather data... Updates every 30 minutes from Open-Meteo.</p>
+                <p style="font-size: 0.85em; opacity: 0.7;">Debug: forecast={'available' if weather_forecast else 'empty'}, conditions={'analyzed' if solar_conditions else 'null'}</p>
             </div>
 """
     
