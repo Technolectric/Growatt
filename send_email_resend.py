@@ -84,25 +84,42 @@ EAT = timezone(timedelta(hours=3))
 # Weather & Solar Forecast Functions
 # ----------------------------
 def get_weather_forecast():
-    """Get weather forecast from Open-Meteo (free, no API key)"""
-    try:
-        url = f"https://api.open-meteo.com/v1/forecast?latitude={LATITUDE}&longitude={LONGITUDE}&hourly=cloud_cover,shortwave_radiation,direct_radiation&timezone=Africa/Nairobi&forecast_days=2"
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-        
-        forecast = {
-            'times': data['hourly']['time'],
-            'cloud_cover': data['hourly']['cloud_cover'],
-            'solar_radiation': data['hourly']['shortwave_radiation'],
-            'direct_radiation': data['hourly']['direct_radiation']
-        }
-        
-        print(f"✓ Weather forecast updated: {len(forecast['times'])} hours")
-        return forecast
-    except Exception as e:
-        print(f"✗ Error fetching weather forecast: {e}")
-        return None
+    """Get weather forecast from Open-Meteo with User-Agent and Retries"""
+    # Open-Meteo requires a User-Agent to prevent blocking
+    weather_headers = {
+        "User-Agent": "SolarMonitor/1.0 (TuliaHouse; contact: admin@tulia.com)",
+        "Accept": "application/json"
+    }
+    
+    url = f"https://api.open-meteo.com/v1/forecast?latitude={LATITUDE}&longitude={LONGITUDE}&hourly=cloud_cover,shortwave_radiation,direct_radiation&timezone=Africa/Nairobi&forecast_days=2"
+    
+    # Try up to 3 times
+    for attempt in range(3):
+        try:
+            print(f"🌤️ Requesting weather data (Attempt {attempt+1})...")
+            response = requests.get(url, headers=weather_headers, timeout=15)
+            response.raise_for_status()
+            data = response.json()
+            
+            forecast = {
+                'times': data['hourly']['time'],
+                'cloud_cover': data['hourly']['cloud_cover'],
+                'solar_radiation': data['hourly']['shortwave_radiation'],
+                'direct_radiation': data['hourly']['direct_radiation']
+            }
+            
+            print(f"✓ Weather forecast updated: {len(forecast['times'])} hours data received")
+            return forecast
+            
+        except requests.exceptions.RequestException as e:
+            print(f"⚠️ Weather fetch attempt {attempt+1} failed: {e}")
+            time.sleep(2) # Wait 2 seconds before retrying
+        except Exception as e:
+            print(f"✗ Unexpected error parsing weather: {e}")
+            return None
+            
+    print("✗ Failed to fetch weather after 3 attempts")
+    return None
 
 def analyze_solar_conditions(forecast):
     """Analyze upcoming solar conditions - smart daytime-only analysis"""
@@ -130,14 +147,28 @@ def analyze_solar_conditions(forecast):
         count = 0
         
         for i, time_str in enumerate(forecast['times']):
-            forecast_time = datetime.fromisoformat(time_str.replace('Z', '+00:00')).astimezone(EAT)
-            
-            if start_time <= forecast_time <= end_time:
-                hour = forecast_time.hour
-                if 6 <= hour <= 18:
-                    avg_cloud_cover += forecast['cloud_cover'][i]
-                    avg_solar_radiation += forecast['solar_radiation'][i]
-                    count += 1
+            # Open-Meteo returns ISO strings, sometimes without offset if timezone param is used
+            # We handle both cases safely
+            try:
+                # Replace Z if present, though Open-Meteo usually sends local time string
+                clean_time = time_str.replace('Z', '')
+                forecast_time = datetime.fromisoformat(clean_time)
+                
+                # If naive (no timezone), assume it is EAT because we requested EAT
+                if forecast_time.tzinfo is None:
+                    forecast_time = forecast_time.replace(tzinfo=EAT)
+                else:
+                    forecast_time = forecast_time.astimezone(EAT)
+                
+                if start_time <= forecast_time <= end_time:
+                    hour = forecast_time.hour
+                    if 6 <= hour <= 18:
+                        avg_cloud_cover += forecast['cloud_cover'][i]
+                        avg_solar_radiation += forecast['solar_radiation'][i]
+                        count += 1
+            except ValueError as ve:
+                print(f"Date parse error: {ve} for {time_str}")
+                continue
         
         if count > 0:
             avg_cloud_cover /= count
@@ -526,10 +557,12 @@ def poll_growatt():
     
     while True:
         try:
-            # Update weather every 30 minutes
-            if last_weather_update is None or datetime.now(EAT) - last_weather_update > timedelta(minutes=30):
-                weather_forecast = get_weather_forecast()
-                last_weather_update = datetime.now(EAT)
+            # Update weather every 30 minutes OR if we don't have it yet
+            if weather_forecast is None or last_weather_update is None or datetime.now(EAT) - last_weather_update > timedelta(minutes=30):
+                new_forecast = get_weather_forecast()
+                if new_forecast:
+                    weather_forecast = new_forecast
+                    last_weather_update = datetime.now(EAT)
             
             total_output_power = 0
             total_battery_discharge_W = 0
