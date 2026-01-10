@@ -547,50 +547,81 @@ def generate_solar_forecast(weather_forecast_data, historical_pattern):
     
     return forecast
 
-def generate_load_forecast(historical_pattern):
-    """Generate load demand forecast based on historical patterns"""
+# ----------------------------
+# UPDATED: Smart Load Forecasting
+# ----------------------------
+
+def get_default_load_for_hour(hour):
+    """Return a realistic fallback load based on time of day (replacing static 1500W)"""
+    if 0 <= hour < 5: return 600    # Deep night (Fridge + Standby)
+    if 5 <= hour < 8: return 1800   # Morning wake up (Kettle/Shower)
+    if 8 <= hour < 17: return 1200  # Daytime average
+    if 17 <= hour < 22: return 2800 # Evening Peak (Cooking/Lights)
+    return 1000                     # Late night winding down
+
+def calculate_moving_average_load(history_minutes=45):
+    """
+    Calculate the average load from the last N minutes of chart history.
+    This uses the 'load_history' list which drives the frontend chart.
+    """
+    now = datetime.now(EAT)
+    cutoff = now - timedelta(minutes=history_minutes)
+    
+    # Filter global load_history for recent entries
+    recent_loads = [power for time, power in load_history if time >= cutoff]
+    
+    if not recent_loads:
+        return 0
+    
+    return sum(recent_loads) / len(recent_loads)
+
+def generate_load_forecast(historical_pattern, moving_avg_load=0):
+    """Generate load demand forecast based on historical patterns AND current trend"""
     forecast = []
     now = datetime.now(EAT)
     
-    if not historical_pattern:
-        # Default pattern based on your actual load data
-        for hour_offset in range(FORECAST_HOURS):
-            forecast_time = now + timedelta(hours=hour_offset)
-            hour_of_day = forecast_time.hour
-            
-            # Your actual load pattern from data
-            if 6 <= hour_of_day <= 9:  # Morning peak
-                load = 2500  # 2.5kW morning load
-            elif 18 <= hour_of_day <= 22:  # Evening peak
-                load = 2800  # 2.8kW evening load
-            elif hour_of_day < 6 or hour_of_day >= 23:  # Night low
-                load = 800   # 0.8kW overnight
-            else:  # Daytime normal
-                load = 1500  # 1.5kW daytime
-            
-            forecast.append({
-                'time': forecast_time,
-                'hour': hour_of_day,
-                'estimated_load': load
-            })
-    else:
-        # Use historical pattern
-        for hour_offset in range(FORECAST_HOURS):
-            forecast_time = now + timedelta(hours=hour_offset)
-            hour_of_day = forecast_time.hour
-            
-            # Find historical pattern for this hour
-            pattern_load = 1500  # Default 1.5kW
-            for pattern_hour, normalized, actual_load in historical_pattern:
+    for hour_offset in range(FORECAST_HOURS):
+        forecast_time = now + timedelta(hours=hour_offset)
+        hour_of_day = forecast_time.hour
+        
+        # 1. Determine Base Profile (Historical or Default)
+        base_load = 0
+        found_in_history = False
+        
+        if historical_pattern:
+            for pattern_hour, _, actual_load in historical_pattern:
                 if pattern_hour == hour_of_day:
-                    pattern_load = actual_load
+                    base_load = actual_load
+                    found_in_history = True
                     break
+        
+        # Fallback if no history for this specific hour (using smart time-of-day profile)
+        if not found_in_history:
+            base_load = get_default_load_for_hour(hour_of_day)
             
-            forecast.append({
-                'time': forecast_time,
-                'hour': hour_of_day,
-                'estimated_load': pattern_load
-            })
+        # 2. Blend Moving Average with Base Profile
+        # This creates a smooth transition from current chart status to future prediction
+        if moving_avg_load > 0:
+            if hour_offset == 0:
+                # Immediate future: 80% current trend, 20% profile
+                final_load = (moving_avg_load * 0.8) + (base_load * 0.2)
+            elif hour_offset == 1:
+                # Near future: 50% current trend, 50% profile
+                final_load = (moving_avg_load * 0.5) + (base_load * 0.5)
+            elif hour_offset == 2:
+                 # Mid future: 20% trend, 80% profile
+                final_load = (moving_avg_load * 0.2) + (base_load * 0.8)
+            else:
+                # Distant future: 100% profile
+                final_load = base_load
+        else:
+            final_load = base_load
+            
+        forecast.append({
+            'time': forecast_time,
+            'hour': hour_of_day,
+            'estimated_load': final_load
+        })
     
     return forecast
 
@@ -1048,7 +1079,7 @@ def check_and_send_alerts(inverter_data, solar_conditions, total_solar_input, to
 # Growatt Polling Loop
 # ----------------------------
 def poll_growatt():
-    global latest_data, load_history, battery_history, weather_forecast, last_communication, solar_conditions_cache, solar_forecast
+    global latest_data, load_history, battery_history, weather_forecast, last_communication, solar_conditions_cache, solar_forecast, alert_history
     
     # Fetch weather immediately on startup
     print("🌤️ Fetching initial weather forecast...")
@@ -1059,18 +1090,25 @@ def poll_growatt():
     
     while True:
         try:
+            now = datetime.now(EAT)
+            
+            # --- FIX: Clean up old alerts EVERY LOOP ---
+            # Remove alerts older than 12 hours from the display history
+            cutoff_time = now - timedelta(hours=12)
+            alert_history[:] = [a for a in alert_history if a['timestamp'] >= cutoff_time]
+            # ---------------------------------------------
+            
             # Update weather forecast every 30 minutes
-            if last_weather_update is None or datetime.now(EAT) - last_weather_update > timedelta(minutes=30):
+            if last_weather_update is None or now - last_weather_update > timedelta(minutes=30):
                 weather_forecast = get_weather_forecast()
                 if weather_forecast:
                     solar_conditions_cache = analyze_solar_conditions(weather_forecast)
-                last_weather_update = datetime.now(EAT)
+                last_weather_update = now
             
             total_output_power = 0
             total_battery_discharge_W = 0
             total_solar_input_W = 0
             inverter_data = []
-            now = datetime.now(EAT)
             
             primary_capacities = []
             backup_data = None
@@ -1187,6 +1225,13 @@ def poll_growatt():
             update_solar_pattern(total_solar_input_W)
             update_load_pattern(total_output_power)
             
+            # Append to history immediately so we can use it for calculations
+            load_history.append((now, total_output_power))
+            load_history = [(t, p) for t, p in load_history if t >= now - timedelta(hours=12)]
+            
+            battery_history.append((now, total_battery_discharge_W))
+            battery_history = [(t, p) for t, p in battery_history if t >= now - timedelta(hours=12)]
+            
             # Analyze historical patterns
             solar_pattern = analyze_historical_solar_pattern()
             load_pattern = analyze_historical_load_pattern()
@@ -1195,9 +1240,14 @@ def poll_growatt():
             solar_forecast.clear()
             load_forecast = []
             
-            # Always run forecast generation, even if weather is partial (it handles robustness now)
+            # Always run forecast generation
             solar_forecast = generate_solar_forecast(weather_forecast, solar_pattern)
-            load_forecast = generate_load_forecast(load_pattern)
+            
+            # --- FIX: Use Moving Average for Trend Extrapolation ---
+            # Use data from the chart history to smooth out the forecast
+            moving_avg_load = calculate_moving_average_load(history_minutes=45)
+            load_forecast = generate_load_forecast(load_pattern, moving_avg_load=moving_avg_load)
+            # -------------------------------------------------------
             
             # Calculate system metrics
             primary_battery_min = min(primary_capacities) if primary_capacities else 0
@@ -1233,14 +1283,7 @@ def poll_growatt():
                 "load_pattern_count": len(load_demand_pattern)
             }
             
-            # Append to history
-            load_history.append((now, total_output_power))
-            load_history = [(t, p) for t, p in load_history if t >= now - timedelta(hours=12)]
-            
-            battery_history.append((now, total_battery_discharge_W))
-            battery_history = [(t, p) for t, p in battery_history if t >= now - timedelta(hours=12)]
-            
-            print(f"{latest_data['timestamp']} | Load={total_output_power:.0f}W | Solar={total_solar_input_W:.0f}W | Battery Discharge={total_battery_discharge_W:.0f}W | Primary={primary_battery_min:.0f}% | Backup={backup_battery_voltage:.1f}V | Gen={'ON' if generator_running else 'OFF'}")
+            print(f"{latest_data['timestamp']} | Load={total_output_power:.0f}W | Solar={total_solar_input_W:.0f}W | BatDisc={total_battery_discharge_W:.0f}W | TrendLoad={moving_avg_load:.0f}W")
             
             # Check alerts with solar-aware logic (use cached solar_conditions)
             check_and_send_alerts(inverter_data, solar_conditions_cache, total_solar_input_W, total_battery_discharge_W, generator_running)
