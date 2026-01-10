@@ -57,9 +57,9 @@ BACKUP_BATTERY_DEGRADED_WH = 21000   # 70% remaining after 5 years (15% degradat
 BACKUP_BATTERY_USABLE_WH = 14700     # 70% of degraded capacity
 
 # Tiered Load Alert System (SOLAR-AWARE - only alerts on battery discharge)
-# TIER 1: Moderate battery discharge (1000-1500W) + Low Battery - 120 min cooldown
-# TIER 2: High battery discharge (1500-2500W) - 60 min cooldown
-# TIER 3: Very High battery discharge (>2500W) - 30 min cooldown
+# TIER 1: Moderate battery discharge (1500-2000W) + Low Battery - 120 min cooldown
+# TIER 2: High battery discharge (2500-3500W) - 60 min cooldown
+# TIER 3: Very High battery discharge (>3500W) - 30 min cooldown
 # Note: Alerts only if power is coming from BATTERY, not if solar is covering load
 
 # ----------------------------
@@ -756,10 +756,10 @@ def send_email(subject, html_content, alert_type="general"):
     # Increased cooldowns to reduce email frequency
     cooldown_map = {
         "critical": 60,           # Generator starting
-        "very_high_load": 30,     # >2500W from battery
+        "very_high_load": 30,     # >3500W from battery
         "backup_active": 120,     # Backup supplying power
-        "high_load": 60,          # 1500-2500W from battery
-        "moderate_load": 120,     # 1000-1500W with low battery
+        "high_load": 60,          # 2500-3500W from battery
+        "moderate_load": 120,     # 1500-2000W with low battery
         "warning": 120,           # Primary battery warning
         "communication_lost": 60, # Inverter offline
         "fault_alarm": 30,        # Inverter fault
@@ -1000,8 +1000,8 @@ def check_and_send_alerts(inverter_data, solar_conditions, total_solar_input, to
     # Only alert if power is coming from BATTERY, not solar
     # ============================================
     
-    # TIER 3: Very High Battery Discharge (>2500W)
-    if total_battery_discharge >= 2500:
+    # TIER 3: Very High Battery Discharge (>4500W)
+    if total_battery_discharge >= 4500:
         send_email(
             subject="🚨 URGENT: Very High Battery Discharge",
             html_content=f"""
@@ -1030,8 +1030,8 @@ def check_and_send_alerts(inverter_data, solar_conditions, total_solar_input, to
             alert_type="very_high_load"
         )
     
-    # TIER 2: High Battery Discharge (1500-2500W)
-    elif 1500 <= total_battery_discharge < 2500:
+    # TIER 2: High Battery Discharge (2500-3500W)
+    elif 2500 <= total_battery_discharge < 3500:
         send_email(
             subject="⚠️ WARNING: High Battery Discharge",
             html_content=f"""
@@ -1054,8 +1054,8 @@ def check_and_send_alerts(inverter_data, solar_conditions, total_solar_input, to
             alert_type="high_load"
         )
     
-    # TIER 1: Moderate Battery Discharge (1000-1500W) with Low Battery
-    elif 1000 <= total_battery_discharge < 1500 and primary_capacity < 50:
+    # TIER 1: Moderate Battery Discharge (1500-2000W) with Low Battery
+    elif 1500 <= total_battery_discharge < 2000 and primary_capacity < 50:
         send_email(
             subject="ℹ️ INFO: Moderate Battery Discharge - Low Battery",
             html_content=f"""
