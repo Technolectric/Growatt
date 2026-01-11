@@ -1166,6 +1166,94 @@ def home():
             to { transform: rotate(360deg); }
         }
         
+        /* Recommendations */
+        .recommendation-card {
+            background: linear-gradient(135deg, var(--bg-secondary), var(--bg-card));
+            border: 2px solid var(--border-color);
+        }
+        
+        .recommendation-card.safe {
+            border-color: var(--accent-primary);
+            background: linear-gradient(135deg, rgba(0, 255, 136, 0.1), var(--bg-card));
+        }
+        
+        .recommendation-card.caution {
+            border-color: var(--accent-warning);
+            background: linear-gradient(135deg, rgba(255, 170, 0, 0.1), var(--bg-card));
+        }
+        
+        .recommendation-card.danger {
+            border-color: var(--accent-critical);
+            background: linear-gradient(135deg, rgba(255, 51, 102, 0.1), var(--bg-card));
+        }
+        
+        .recommendation-header {
+            display: flex;
+            align-items: flex-start;
+            gap: 1.5rem;
+            margin-bottom: 1.5rem;
+            padding-bottom: 1.5rem;
+            border-bottom: 1px solid var(--border-color);
+        }
+        
+        .recommendation-icon {
+            font-size: 3rem;
+            flex-shrink: 0;
+        }
+        
+        .recommendation-details {
+            background: var(--bg-secondary);
+            padding: 1.5rem;
+            border-radius: 12px;
+            line-height: 1.8;
+        }
+        
+        .recommendation-details strong {
+            color: var(--accent-primary);
+            font-weight: 700;
+        }
+        
+        .recommendation-card.caution .recommendation-details strong {
+            color: var(--accent-warning);
+        }
+        
+        .recommendation-card.danger .recommendation-details strong {
+            color: var(--accent-critical);
+        }
+        
+        .schedule-content {
+            line-height: 1.8;
+        }
+        
+        .schedule-item {
+            padding: 1rem;
+            background: var(--bg-secondary);
+            border-radius: 8px;
+            margin-bottom: 0.75rem;
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+        }
+        
+        .schedule-item-icon {
+            font-size: 1.5rem;
+            flex-shrink: 0;
+        }
+        
+        .schedule-item-content {
+            flex: 1;
+        }
+        
+        .schedule-item-title {
+            font-weight: 700;
+            margin-bottom: 0.25rem;
+        }
+        
+        .schedule-item-time {
+            color: var(--text-secondary);
+            font-size: 0.9rem;
+        }
+        
         /* Utility classes */
         .text-success { color: var(--accent-primary); }
         .text-warning { color: var(--accent-warning); }
@@ -1199,6 +1287,56 @@ def home():
         <div class="status-hero {{ status_class }}">
             <div class="status-title">{{ status_title }}</div>
             <div class="status-subtitle">{{ status_subtitle }}</div>
+        </div>
+        
+        <!-- Smart Recommendations -->
+        <div class="grid-2" style="margin-top: 2rem;">
+            <div class="card recommendation-card {{ recommendation_class }}">
+                <div class="recommendation-header">
+                    <div class="recommendation-icon">{{ recommendation_icon }}</div>
+                    <div>
+                        <h3 style="margin: 0;">{{ recommendation_title }}</h3>
+                        <p style="margin: 0.5rem 0 0 0; color: var(--text-secondary);">{{ recommendation_subtitle }}</p>
+                    </div>
+                </div>
+                <div class="recommendation-details">
+                    {{ recommendation_details|safe }}
+                </div>
+            </div>
+            
+            <div class="card">
+                <h3 style="margin-top: 0;">📅 Smart Schedule (Next 12h)</h3>
+                <div class="schedule-content">
+                    {{ schedule_content|safe }}
+                </div>
+            </div>
+        </div>
+        
+        <!-- Load Recommendations - Prominent Card -->
+        <div class="card" style="border: 2px solid {{ recommendation_border_color }}; background: {{ recommendation_bg }};">
+            <div style="display: flex; align-items: center; gap: 1rem; margin-bottom: 1rem;">
+                <div style="font-size: 3rem;">{{ recommendation_icon }}</div>
+                <div style="flex: 1;">
+                    <h2 style="margin: 0; color: {{ recommendation_color }};">{{ recommendation_title }}</h2>
+                    <p style="margin: 0.5rem 0 0 0; color: var(--text-secondary); font-size: 1.1rem;">{{ recommendation_subtitle }}</p>
+                </div>
+            </div>
+            
+            <div class="grid-2" style="margin-top: 1.5rem;">
+                <div>
+                    <h3 style="font-size: 1rem; margin-bottom: 0.75rem; color: var(--text-secondary);">📅 Today's Schedule</h3>
+                    <div style="background: var(--bg-secondary); padding: 1rem; border-radius: 8px;">
+                        {{ schedule_html|safe }}
+                    </div>
+                </div>
+                
+                <div>
+                    <h3 style="font-size: 1rem; margin-bottom: 0.75rem; color: var(--text-secondary);">💡 Usage Guidelines</h3>
+                    <div style="background: var(--bg-secondary); padding: 1rem; border-radius: 8px;">
+                        {{ usage_guidelines|safe }}
+                    </div>
+                </div>
+            </div>
         </div>
         
         <!-- Key Metrics Grid -->
@@ -1718,6 +1856,208 @@ def home():
     alerts = [{"time": a['timestamp'].strftime("%H:%M"), "subject": a['subject'], "type": a['type']} 
               for a in reversed(alert_history[-10:])]
     
+    # Smart Recommendations
+    recommendation_icon = "⚡"
+    recommendation_title = "Power Status"
+    recommendation_subtitle = "Current system assessment"
+    recommendation_class = "safe"
+    recommendation_details = ""
+    
+    safe_statuses = ["COOK NOW", "OVEN", "BATTERY FULL", "SOLAR POWERING", "HIGH SURPLUS"]
+    is_safe_now = any(s in app_st for s in safe_statuses)
+    
+    if gen_on:
+        recommendation_icon = "🚨"
+        recommendation_title = "CRITICAL - Generator Running"
+        recommendation_subtitle = "Immediate action required"
+        recommendation_class = "danger"
+        recommendation_details = """
+            <strong>⛔ DO NOT use any heavy loads:</strong><br>
+            • No oven, kettle, washing machine, or dryer<br>
+            • Turn off pool pumps immediately<br>
+            • Minimize all non-essential loads<br>
+            • System is on backup power - conserve energy
+        """
+    elif b_active:
+        recommendation_icon = "⚠️"
+        recommendation_title = "Backup Battery Active"
+        recommendation_subtitle = "Primary battery depleted"
+        recommendation_class = "danger"
+        recommendation_details = """
+            <strong>❌ Heavy loads NOT recommended:</strong><br>
+            • Backup battery is limited capacity<br>
+            • Avoid oven, kettle, high-power appliances<br>
+            • Wait for solar charging to resume<br>
+            • System will switch to generator if backup depletes
+        """
+    elif p_bat > 95:
+        recommendation_icon = "🔋"
+        recommendation_title = "Battery Full - Use Power Now!"
+        recommendation_subtitle = "Excellent time for heavy loads"
+        recommendation_class = "safe"
+        recommendation_details = f"""
+            <strong>✅ ALL heavy loads are SAFE:</strong><br>
+            • Oven & Kettle: Safe to use<br>
+            • Washing Machine & Dryer: Good time<br>
+            • Pool Pumps: Can run<br>
+            • Battery at maximum capacity ({p_bat:.0f}%)
+        """
+    elif (p_bat > 75 and surplus_power > 3000):
+        recommendation_icon = "⚡"
+        recommendation_title = "High Surplus - Perfect Time!"
+        recommendation_subtitle = f"Excess power: {surplus_power:.0f}W available"
+        recommendation_class = "safe"
+        recommendation_details = f"""
+            <strong>✅ Excellent conditions for heavy loads:</strong><br>
+            • Oven (2000-3000W): ✅ Safe<br>
+            • Kettle (1500-2000W): ✅ Safe<br>
+            • Washing Machine (500-1000W): ✅ Safe<br>
+            • Battery: {p_bat:.0f}% | Surplus: {surplus_power:.0f}W
+        """
+    elif tot_sol > 2000 and (tot_sol > tot_load * 0.9):
+        recommendation_icon = "☀️"
+        recommendation_title = "Solar Powering System"
+        recommendation_subtitle = "Good solar generation"
+        recommendation_class = "safe"
+        recommendation_details = f"""
+            <strong>✅ Moderate loads are safe:</strong><br>
+            • Kettle (1500W): ✅ Safe<br>
+            • Washing Machine: ✅ Safe<br>
+            • Oven: ⚠️ Monitor battery (currently {p_bat:.0f}%)<br>
+            • Solar generation: {tot_sol:.0f}W
+        """
+    elif weather_bad and p_bat > 80:
+        recommendation_icon = "⚡"
+        recommendation_title = "Cook Now - Bad Weather Ahead"
+        recommendation_subtitle = "Poor solar forecast expected"
+        recommendation_class = "safe"
+        recommendation_details = f"""
+            <strong>⚡ Use power NOW before conditions worsen:</strong><br>
+            • Heavy loads recommended while battery is high<br>
+            • Battery: {p_bat:.0f}% (excellent level)<br>
+            • Low solar expected in coming hours<br>
+            • Better to use stored energy than waste it
+        """
+    elif weather_bad and p_bat < 70:
+        recommendation_icon = "☁️"
+        recommendation_title = "Conserve Power"
+        recommendation_subtitle = "Low solar forecast & moderate battery"
+        recommendation_class = "caution"
+        recommendation_details = f"""
+            <strong>⚠️ Minimize heavy loads:</strong><br>
+            • Avoid oven and kettle if possible<br>
+            • Delay washing/drying until conditions improve<br>
+            • Battery: {p_bat:.0f}% (moderate)<br>
+            • Poor solar conditions forecast
+        """
+    elif p_bat < 45 and tot_sol < tot_load:
+        recommendation_icon = "⚠️"
+        recommendation_title = "Reduce Loads"
+        recommendation_subtitle = "Battery low & discharging"
+        recommendation_class = "caution"
+        recommendation_details = f"""
+            <strong>⚠️ Heavy loads NOT recommended:</strong><br>
+            • Battery: {p_bat:.0f}% (low)<br>
+            • System is discharging ({tot_dis:.0f}W)<br>
+            • Avoid oven, kettle, heavy appliances<br>
+            • Wait for better solar generation
+        """
+    elif surplus_power > 100:
+        recommendation_icon = "🔋"
+        recommendation_title = "Battery Charging"
+        recommendation_subtitle = "System recovering"
+        recommendation_class = "safe"
+        recommendation_details = f"""
+            <strong>✅ Light to moderate loads OK:</strong><br>
+            • System is charging (+{surplus_power:.0f}W)<br>
+            • Kettle & small appliances: Safe<br>
+            • Oven: Wait for higher surplus<br>
+            • Battery: {p_bat:.0f}%
+        """
+    else:
+        recommendation_icon = "ℹ️"
+        recommendation_title = "Normal Operation"
+        recommendation_subtitle = "Monitor before heavy loads"
+        recommendation_class = "safe"
+        recommendation_details = f"""
+            <strong>ℹ️ Standard operating conditions:</strong><br>
+            • Light loads: ✅ Safe<br>
+            • Heavy loads: Check battery level first<br>
+            • Battery: {p_bat:.0f}%<br>
+            • Solar: {tot_sol:.0f}W | Load: {tot_load:.0f}W
+        """
+    
+    # Smart Schedule
+    forecast_data = latest_data.get('solar_forecast', [])
+    schedule_items = []
+    
+    if is_safe_now:
+        schedule_items.append({
+            'icon': '⚡',
+            'title': 'Current Window: Safe to Use Heavy Loads',
+            'time': 'Right now',
+            'type': 'safe'
+        })
+    
+    if forecast_data:
+        # Find best solar window
+        best_start, best_end, current_run = None, None, 0
+        temp_start = None
+        for d in forecast_data:
+            gen = d['estimated_generation']
+            if gen > 2000:
+                if current_run == 0: 
+                    temp_start = d['time']
+                current_run += 1
+            else:
+                if current_run > 0:
+                    if best_start is None or current_run > ((best_end.hour if best_end else 0) - (best_start.hour if best_start else 0)):
+                        best_start = temp_start
+                        best_end = d['time']
+                    current_run = 0
+        
+        if best_start and best_end:
+            schedule_items.append({
+                'icon': '🚿',
+                'title': 'Best Time for Washing/Heavy Loads',
+                'time': f"{best_start.strftime('%I:%M %p').lstrip('0')} - {best_end.strftime('%I:%M %p').lstrip('0')}",
+                'type': 'safe'
+            })
+        else:
+            schedule_items.append({
+                'icon': '⚠️',
+                'title': 'No High Solar Window Today',
+                'time': 'Avoid heavy loads',
+                'type': 'danger'
+            })
+        
+        # Check for cloud warnings
+        next_3_gen = sum([d['estimated_generation'] for d in forecast_data[:3]]) / 3
+        current_hour = datetime.now(EAT).hour
+        if next_3_gen < 500 and 8 <= current_hour <= 16:
+            schedule_items.append({
+                'icon': '☁️',
+                'title': 'Cloud Warning',
+                'time': 'Low solar expected next 3 hours',
+                'type': 'caution'
+            })
+    
+    schedule_content = ""
+    if schedule_items:
+        for item in schedule_items:
+            color = "var(--accent-primary)" if item['type'] == 'safe' else ("var(--accent-warning)" if item['type'] == 'caution' else "var(--accent-critical)")
+            schedule_content += f"""
+                <div class="schedule-item">
+                    <div class="schedule-item-icon">{item['icon']}</div>
+                    <div class="schedule-item-content">
+                        <div class="schedule-item-title" style="color: {color};">{item['title']}</div>
+                        <div class="schedule-item-time">{item['time']}</div>
+                    </div>
+                </div>
+            """
+    else:
+        schedule_content = '<div style="text-align: center; padding: 2rem; color: var(--text-secondary);">Initializing forecast data...</div>'
+    
     from flask import render_template_string
     return render_template_string(
         html_template,
@@ -1725,6 +2065,12 @@ def home():
         status_title=app_st,
         status_subtitle=app_sub,
         status_class=app_col,
+        recommendation_icon=recommendation_icon,
+        recommendation_title=recommendation_title,
+        recommendation_subtitle=recommendation_subtitle,
+        recommendation_class=recommendation_class,
+        recommendation_details=recommendation_details,
+        schedule_content=schedule_content,
         load_value=f"{tot_load:.0f}",
         solar_value=f"{tot_sol:.0f}",
         primary_pct=f"{p_bat:.0f}",
