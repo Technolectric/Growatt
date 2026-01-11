@@ -1343,7 +1343,7 @@ def home():
         <div class="grid-4" style="margin-top: 2rem;">
             <div class="metric-card">
                 <div class="metric-label">Load Demand</div>
-                <div class="metric-value text-info">{{ load_value }}<span class="metric-unit">W</span></div>
+                <div class="metric-value text-info">{{ load_display }}<span class="metric-unit">W</span></div>
                 <div class="metric-trend {{ load_trend_class }}">
                     <span>{{ load_trend_icon }}</span>
                     <span>{{ load_trend_text }}</span>
@@ -1352,7 +1352,7 @@ def home():
             
             <div class="metric-card">
                 <div class="metric-label">Solar Generation</div>
-                <div class="metric-value text-success">{{ solar_value }}<span class="metric-unit">W</span></div>
+                <div class="metric-value text-success">{{ solar_display }}<span class="metric-unit">W</span></div>
                 <div class="metric-trend {{ solar_trend_class }}">
                     <span>{{ solar_trend_icon }}</span>
                     <span>{{ solar_trend_text }}</span>
@@ -1361,13 +1361,13 @@ def home():
             
             <div class="metric-card">
                 <div class="metric-label">Primary Battery</div>
-                <div class="metric-value {{ primary_color }}">{{ primary_pct }}<span class="metric-unit">%</span></div>
+                <div class="metric-value {{ primary_color }}">{{ primary_display }}<span class="metric-unit">%</span></div>
                 <div style="margin-top: 0.5rem; color: var(--text-secondary); font-size: 0.9rem;">{{ primary_kwh }} kWh</div>
             </div>
             
             <div class="metric-card">
                 <div class="metric-label">Backup Battery</div>
-                <div class="metric-value {{ backup_color }}">{{ backup_volt }}<span class="metric-unit">V</span></div>
+                <div class="metric-value {{ backup_color }}">{{ backup_volt_display }}<span class="metric-unit">V</span></div>
                 <div style="margin-top: 0.5rem; color: var(--text-secondary); font-size: 0.9rem;">{{ backup_kwh }} kWh</div>
             </div>
         </div>
@@ -1456,7 +1456,7 @@ def home():
                 <div class="flow-node solar {{ 'active' if solar_active else '' }}" style="left: 50px; top: 50%; transform: translateY(-50%);">
                     <div class="flow-icon">☀️</div>
                     <div class="flow-label">Solar</div>
-                    <div class="flow-value">{{ solar_value }}W</div>
+                    <div class="flow-value">{{ solar_display }}W</div>
                 </div>
                 
                 <div class="flow-node inverter active" style="left: 50%; top: 50%; transform: translate(-50%, -50%);">
@@ -1468,13 +1468,13 @@ def home():
                 <div class="flow-node load active" style="right: 50px; top: 50%; transform: translateY(-50%);">
                     <div class="flow-icon">🏠</div>
                     <div class="flow-label">Load</div>
-                    <div class="flow-value">{{ load_value }}W</div>
+                    <div class="flow-value">{{ load_display }}W</div>
                 </div>
                 
                 <div class="flow-node battery {{ 'active' if battery_charging or battery_discharging else '' }}" style="left: 50%; bottom: 30px; transform: translateX(-50%);">
                     <div class="flow-icon">🔋</div>
                     <div class="flow-label">Battery</div>
-                    <div class="flow-value">{{ primary_pct }}%</div>
+                    <div class="flow-value">{{ primary_display }}%</div>
                 </div>
                 
                 <div class="flow-node generator {{ 'active' if generator_on else '' }}" style="left: 50%; top: 30px; transform: translateX(-50%);">
@@ -1491,7 +1491,7 @@ def home():
                 <h2>Primary Battery (30 kWh)</h2>
                 <div class="battery-container">
                     <div class="battery-fill {{ primary_battery_class }}" style="height: {{ primary_pct }}%;">
-                        <div class="battery-percentage">{{ primary_pct }}%</div>
+                        <div class="battery-percentage">{{ primary_display }}%</div>
                     </div>
                 </div>
             </div>
@@ -1500,7 +1500,7 @@ def home():
                 <h2>Backup Battery (21 kWh)</h2>
                 <div class="battery-container">
                     <div class="battery-fill {{ backup_battery_class }}" style="height: {{ backup_pct }}%;">
-                        <div class="battery-percentage">{{ backup_pct }}%</div>
+                        <div class="battery-percentage">{{ backup_pct_display }}%</div>
                     </div>
                 </div>
             </div>
@@ -2071,10 +2071,18 @@ def home():
         recommendation_class=recommendation_class,
         recommendation_details=recommendation_details,
         schedule_content=schedule_content,
-        load_value=f"{tot_load:.0f}",
-        solar_value=f"{tot_sol:.0f}",
-        primary_pct=f"{p_bat:.0f}",
-        backup_volt=f"{b_volt:.1f}",
+        # Numeric values for logic
+        load_value=tot_load,
+        solar_value=tot_sol,
+        primary_pct=p_bat,
+        backup_volt=b_volt,
+        backup_pct=b_pct,
+        # Formatted strings for display
+        load_display=f"{tot_load:.0f}",
+        solar_display=f"{tot_sol:.0f}",
+        primary_display=f"{p_bat:.0f}",
+        backup_volt_display=f"{b_volt:.1f}",
+        backup_pct_display=f"{b_pct:.0f}",
         primary_kwh=f"{p_kwh:.1f}",
         backup_kwh=f"{b_kwh:.1f}",
         load_trend_icon=load_trend_icon,
@@ -2087,7 +2095,6 @@ def home():
         backup_color=backup_color,
         primary_battery_class=primary_battery_class,
         backup_battery_class=backup_battery_class,
-        backup_pct=f"{b_pct:.0f}",
         solar_active=solar_active,
         battery_active=battery_active,
         battery_charging=battery_charging,
