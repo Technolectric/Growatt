@@ -22,7 +22,7 @@ SERIAL_NUMBERS = os.getenv("SERIAL_NUMBERS", "").split(",")
 POLL_INTERVAL_MINUTES = int(os.getenv("POLL_INTERVAL_MINUTES", 5))
 
 # ----------------------------
-# Inverter Configuration (Display order: 1, 2, 3)
+# Inverter Configuration
 # ----------------------------
 INVERTER_CONFIG = {
     "RKG3B0400T": {"label": "Inverter 1", "type": "primary", "datalog": "DDD0B021CC", "display_order": 1},
@@ -30,52 +30,33 @@ INVERTER_CONFIG = {
     "JNK1CDR0KQ": {"label": "Inverter 3 (Backup)", "type": "backup", "datalog": "DDD0B0221H", "display_order": 3}
 }
 
-# Alert thresholds
-PRIMARY_BATTERY_THRESHOLD = 40  # When backup kicks in
-BACKUP_VOLTAGE_THRESHOLD = 51.2  # When generator starts
+# Thresholds & Battery Specs
+PRIMARY_BATTERY_THRESHOLD = 40
+BACKUP_VOLTAGE_THRESHOLD = 51.2
 TOTAL_SOLAR_CAPACITY_KW = 10
-PRIMARY_INVERTER_CAPACITY_W = 10000  # 10kW combined
-BACKUP_INVERTER_CAPACITY_W = 5000    # 5kW
+PRIMARY_INVERTER_CAPACITY_W = 10000
+BACKUP_INVERTER_CAPACITY_W = 5000
 
-# Backup battery voltage status thresholds
-BACKUP_VOLTAGE_GOOD = 53.0   # Good status
-BACKUP_VOLTAGE_MEDIUM = 52.3  # Medium status  
-BACKUP_VOLTAGE_LOW = 52.0     # Low status
+BACKUP_VOLTAGE_GOOD = 53.0
+BACKUP_VOLTAGE_MEDIUM = 52.3
+BACKUP_VOLTAGE_LOW = 52.0
 
-# Temperature thresholds
-INVERTER_TEMP_WARNING = 60  # °C
-INVERTER_TEMP_CRITICAL = 70  # °C
-
-# Communication timeout
+INVERTER_TEMP_WARNING = 60
+INVERTER_TEMP_CRITICAL = 70
 COMMUNICATION_TIMEOUT_MINUTES = 10
 
-# Battery Specifications (LiFePO4)
-# Primary: 30kWh Total Physical
-# 0-20% (6kWh): Hard Cutoff (Unusable)
-# 20-40% (6kWh): Emergency Reserve (Manual/Emergency)
-# 40-100% (18kWh): Daily Automated Cycling
+# Battery Specs (LiFePO4)
 PRIMARY_BATTERY_CAPACITY_WH = 30000 
 PRIMARY_DAILY_MIN_PCT = 40 
-
-# Backup: 21kWh Total Physical (Degraded)
-# 0-20% (4.2kWh): Hard Cutoff
-# 20-100% (16.8kWh): Usable
 BACKUP_BATTERY_DEGRADED_WH = 21000   
 BACKUP_CUTOFF_PCT = 20
-
-# Total System "Automated" Capacity (for 0-100% chart)
-# 18kWh (Primary Daily) + 16.8kWh (Backup Usable) = 34.8kWh
 TOTAL_SYSTEM_USABLE_WH = 34800 
 
 # ----------------------------
-# Location Config (Kajiado, Kenya)
+# Location & Email
 # ----------------------------
 LATITUDE = -1.85238
 LONGITUDE = 36.77683
-
-# ----------------------------
-# Email (Resend) Config
-# ----------------------------
 RESEND_API_KEY = os.getenv('RESEND_API_KEY')
 SENDER_EMAIL = os.getenv('SENDER_EMAIL')
 RECIPIENT_EMAIL = os.getenv('RECIPIENT_EMAIL')
@@ -94,33 +75,22 @@ solar_conditions_cache = None
 alert_history = []
 last_communication = {}
 
-# Solar forecast globals
 solar_forecast = []
 solar_generation_pattern = deque(maxlen=48)
 load_demand_pattern = deque(maxlen=48)
 SOLAR_EFFICIENCY_FACTOR = 0.85
 FORECAST_HOURS = 12
-
-# East African Timezone
 EAT = timezone(timedelta(hours=3))
 
 # ----------------------------
-# Weather & Analysis Functions
+# Weather Functions
 # ----------------------------
 def get_weather_from_openmeteo():
     try:
         url = f"https://api.open-meteo.com/v1/forecast?latitude={LATITUDE}&longitude={LONGITUDE}&hourly=cloud_cover,shortwave_radiation&timezone=Africa/Nairobi&forecast_days=2"
         response = requests.get(url, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-        return {
-            'times': data['hourly']['time'],
-            'cloud_cover': data['hourly']['cloud_cover'],
-            'solar_radiation': data['hourly']['shortwave_radiation'],
-            'source': 'Open-Meteo'
-        }
-    except Exception:
-        return None
+        return {'times': response.json()['hourly']['time'], 'cloud_cover': response.json()['hourly']['cloud_cover'], 'solar_radiation': response.json()['hourly']['shortwave_radiation'], 'source': 'Open-Meteo'}
+    except: return None
 
 def get_weather_from_weatherapi():
     try:
@@ -129,41 +99,32 @@ def get_weather_from_weatherapi():
         response = requests.get(url, timeout=10)
         if response.status_code == 200:
             data = response.json()
-            times, cloud_cover, solar_radiation = [], [], []
+            times, cloud, solar = [], [], []
             for day in data.get('forecast', {}).get('forecastday', []):
                 for hour in day.get('hour', []):
                     times.append(hour['time'])
-                    cloud_cover.append(hour['cloud'])
-                    uv = hour.get('uv', 0)
-                    solar_radiation.append(uv * 120) 
-            if times:
-                return {'times': times, 'cloud_cover': cloud_cover, 'solar_radiation': solar_radiation, 'source': 'WeatherAPI'}
-        return None
-    except Exception:
-        return None
+                    cloud.append(hour['cloud'])
+                    solar.append(hour.get('uv', 0) * 120) 
+            if times: return {'times': times, 'cloud_cover': cloud, 'solar_radiation': solar, 'source': 'WeatherAPI'}
+    except: pass
+    return None
         
 def get_weather_from_7timer():
     try:
         url = f"http://www.7timer.info/bin/api.pl?lon={LONGITUDE}&lat={LATITUDE}&product=civil&output=json"
         response = requests.get(url, timeout=15)
-        response.raise_for_status()
         data = response.json()
-        times, cloud_cover, solar_radiation = [], [], []
-        base_time = datetime.now(EAT)
+        times, cloud, solar = [], [], []
+        base = datetime.now(EAT)
         for item in data.get('dataseries', [])[:48]:
-            hour_offset = item.get('timepoint', 0)
-            forecast_time = base_time + timedelta(hours=hour_offset)
-            times.append(forecast_time.strftime('%Y-%m-%dT%H:%M'))
-            cloud_val = item.get('cloudcover', 5)
-            cloud_pct = min((cloud_val * 12), 100)
-            cloud_cover.append(cloud_pct)
-            solar_est = max(800 * (1 - cloud_pct/100), 0)
-            solar_radiation.append(solar_est)
-        if times:
-            return {'times': times, 'cloud_cover': cloud_cover, 'solar_radiation': solar_radiation, 'source': '7Timer'}
-        return None
-    except Exception:
-        return None
+            t = base + timedelta(hours=item.get('timepoint', 0))
+            times.append(t.strftime('%Y-%m-%dT%H:%M'))
+            c_pct = min((item.get('cloudcover', 5) * 12), 100)
+            cloud.append(c_pct)
+            solar.append(max(800 * (1 - c_pct/100), 0))
+        if times: return {'times': times, 'cloud_cover': cloud, 'solar_radiation': solar, 'source': '7Timer'}
+    except: pass
+    return None
 
 def get_fallback_weather():
     times, clouds, rads = [], [], []
@@ -179,12 +140,11 @@ def get_fallback_weather():
 def get_weather_forecast():
     global weather_source
     print("🌤️ Fetching weather forecast...")
-    sources = [("Open-Meteo", get_weather_from_openmeteo), ("WeatherAPI", get_weather_from_weatherapi), ("7Timer", get_weather_from_7timer)]
-    for source_name, fetch_func in sources:
-        forecast = fetch_func()
-        if forecast and len(forecast.get('times', [])) > 0:
-            weather_source = forecast['source']
-            return forecast
+    for src, func in [("Open-Meteo", get_weather_from_openmeteo), ("WeatherAPI", get_weather_from_weatherapi), ("7Timer", get_weather_from_7timer)]:
+        f = func()
+        if f and len(f.get('times', [])) > 0:
+            weather_source = f['source']
+            return f
     weather_source = "Synthetic (Offline)"
     return get_fallback_weather()
 
@@ -192,348 +152,245 @@ def analyze_solar_conditions(forecast):
     if not forecast: return None
     try:
         now = datetime.now(EAT)
-        current_hour = now.hour
-        is_nighttime = current_hour < 6 or current_hour >= 18
-        if is_nighttime:
-            tomorrow = now + timedelta(days=1)
-            start_time = tomorrow.replace(hour=6, minute=0, second=0, microsecond=0)
-            end_time = tomorrow.replace(hour=18, minute=0, second=0, microsecond=0)
-            analysis_label = "Tomorrow's Daylight"
+        h = now.hour
+        is_night = h < 6 or h >= 18
+        if is_night:
+            start = (now + timedelta(days=1)).replace(hour=6, minute=0)
+            end = (now + timedelta(days=1)).replace(hour=18, minute=0)
+            label = "Tomorrow's Daylight"
         else:
-            start_time = now
-            end_time = now.replace(hour=18, minute=0, second=0, microsecond=0)
-            analysis_label = "Today's Remaining Daylight"
+            start = now
+            end = now.replace(hour=18, minute=0)
+            label = "Today's Remaining Daylight"
         
-        avg_cloud_cover, avg_solar_radiation, count = 0, 0, 0
-        for i, time_str in enumerate(forecast['times']):
+        c_sum, s_sum, count = 0, 0, 0
+        for i, t_str in enumerate(forecast['times']):
             try:
-                forecast_time = datetime.fromisoformat(time_str.replace('Z', '')) if 'T' in time_str else datetime.strptime(time_str, '%Y-%m-%d %H:%M')
-                if forecast_time.tzinfo is None: forecast_time = forecast_time.replace(tzinfo=EAT)
-                else: forecast_time = forecast_time.astimezone(EAT)
-                
-                if start_time <= forecast_time <= end_time and 6 <= forecast_time.hour <= 18:
-                    avg_cloud_cover += forecast['cloud_cover'][i]
-                    avg_solar_radiation += forecast['solar_radiation'][i]
+                ft = datetime.fromisoformat(t_str.replace('Z', '')) if 'T' in t_str else datetime.strptime(t_str, '%Y-%m-%d %H:%M')
+                ft = ft.replace(tzinfo=EAT) if ft.tzinfo is None else ft.astimezone(EAT)
+                if start <= ft <= end and 6 <= ft.hour <= 18:
+                    c_sum += forecast['cloud_cover'][i]
+                    s_sum += forecast['solar_radiation'][i]
                     count += 1
             except: continue
         
         if count > 0:
-            avg_cloud_cover /= count
-            avg_solar_radiation /= count
             return {
-                'avg_cloud_cover': avg_cloud_cover,
-                'avg_solar_radiation': avg_solar_radiation,
-                'poor_conditions': avg_cloud_cover > 70 or avg_solar_radiation < 200,
-                'analysis_period': analysis_label,
-                'is_nighttime': is_nighttime
+                'avg_cloud_cover': c_sum/count,
+                'avg_solar_radiation': s_sum/count,
+                'poor_conditions': (c_sum/count) > 70 or (s_sum/count) < 200,
+                'analysis_period': label,
+                'is_nighttime': is_night
             }
-    except Exception: pass
+    except: pass
     return None
 
 # ----------------------------
-# Helper Functions
+# Helper & Forecasting
 # ----------------------------
 def get_backup_voltage_status(voltage):
     if voltage >= BACKUP_VOLTAGE_GOOD: return "Good", "green"
     elif voltage >= BACKUP_VOLTAGE_MEDIUM: return "Medium", "orange"
     else: return "Low", "red"
 
-def check_generator_running(backup_inverter_data):
-    if not backup_inverter_data: return False
-    return float(backup_inverter_data.get('vac', 0) or 0) > 100 or float(backup_inverter_data.get('pAcInPut', 0) or 0) > 50
+def check_generator_running(backup_data):
+    if not backup_data: return False
+    return float(backup_data.get('vac', 0) or 0) > 100 or float(backup_data.get('pAcInPut', 0) or 0) > 50
 
 def analyze_historical_solar_pattern():
     if len(solar_generation_pattern) < 3: return None
-    pattern = []
-    hour_map = {}
-    for hour_data in solar_generation_pattern:
-        hour = hour_data['hour']
-        max_possible = hour_data.get('max_possible', TOTAL_SOLAR_CAPACITY_KW * 1000)
-        if hour not in hour_map: hour_map[hour] = []
-        if max_possible > 0: hour_map[hour].append(hour_data['generation'] / max_possible)
-    for hour, values in hour_map.items(): pattern.append((hour, np.mean(values)))
+    pattern, hour_map = [], {}
+    for d in solar_generation_pattern:
+        h = d['hour']
+        if h not in hour_map: hour_map[h] = []
+        hour_map[h].append(d['generation'] / d.get('max_possible', TOTAL_SOLAR_CAPACITY_KW * 1000))
+    for h, v in hour_map.items(): pattern.append((h, np.mean(v)))
     return pattern
 
 def analyze_historical_load_pattern():
     if len(load_demand_pattern) < 3: return None
-    pattern = []
-    hour_map = {}
-    for hour_data in load_demand_pattern:
-        hour = hour_data['hour']
-        if hour not in hour_map: hour_map[hour] = []
-        hour_map[hour].append(hour_data['load'])
-    for hour, values in hour_map.items(): pattern.append((hour, 0, np.mean(values)))
+    pattern, hour_map = [], {}
+    for d in load_demand_pattern:
+        h = d['hour']
+        if h not in hour_map: hour_map[h] = []
+        hour_map[h].append(d['load'])
+    for h, v in hour_map.items(): pattern.append((h, 0, np.mean(v)))
     return pattern
 
 def get_hourly_weather_forecast(weather_data, num_hours=12):
-    hourly_forecast = []
+    hourly = []
     now = datetime.now(EAT)
-    if not weather_data: return hourly_forecast
-    weather_times = []
-    for i, time_str in enumerate(weather_data['times']):
+    if not weather_data: return hourly
+    w_times = []
+    for i, t_str in enumerate(weather_data['times']):
         try:
-            forecast_time = datetime.fromisoformat(time_str.replace('Z', '')) if 'T' in time_str else datetime.strptime(time_str, '%Y-%m-%d %H:%M')
-            if forecast_time.tzinfo is None: forecast_time = forecast_time.replace(tzinfo=EAT)
-            else: forecast_time = forecast_time.astimezone(EAT)
-            weather_times.append({
-                'time': forecast_time,
-                'cloud_cover': weather_data['cloud_cover'][i] if i < len(weather_data['cloud_cover']) else 50,
-                'solar_radiation': weather_data['solar_radiation'][i] if i < len(weather_data['solar_radiation']) else 0
-            })
+            ft = datetime.fromisoformat(t_str.replace('Z', '')) if 'T' in t_str else datetime.strptime(t_str, '%Y-%m-%d %H:%M')
+            ft = ft.replace(tzinfo=EAT) if ft.tzinfo is None else ft.astimezone(EAT)
+            w_times.append({'time': ft, 'cloud': weather_data['cloud_cover'][i], 'solar': weather_data['solar_radiation'][i]})
         except: continue
-    
-    if not weather_times: return hourly_forecast
-    weather_times.sort(key=lambda x: x['time'])
-    for hour_offset in range(num_hours):
-        forecast_time = now + timedelta(hours=hour_offset)
-        closest = min(weather_times, key=lambda x: abs(x['time'] - forecast_time))
-        hourly_forecast.append({
-            'time': forecast_time,
-            'hour': forecast_time.hour,
-            'cloud_cover': closest['cloud_cover'],
-            'solar_radiation': closest['solar_radiation']
-        })
-    return hourly_forecast
+    w_times.sort(key=lambda x: x['time'])
+    for i in range(num_hours):
+        ft = now + timedelta(hours=i)
+        closest = min(w_times, key=lambda x: abs(x['time'] - ft))
+        hourly.append({'time': ft, 'hour': ft.hour, 'cloud_cover': closest['cloud'], 'solar_radiation': closest['solar']})
+    return hourly
 
-def apply_solar_curve(generation, hour_of_day):
-    if hour_of_day < 6 or hour_of_day >= 19: return 0.0
-    solar_day_length = 13.0
-    solar_hour = (hour_of_day - 6) / solar_day_length
-    curve_factor = np.sin(solar_hour * np.pi) ** 2
-    if hour_of_day <= 7 or hour_of_day >= 18: curve_factor *= 0.7
-    return generation * curve_factor
+def apply_solar_curve(gen, hour):
+    if hour < 6 or hour >= 19: return 0.0
+    curve = np.sin(((hour - 6) / 13.0) * np.pi) ** 2
+    return gen * curve * (0.7 if hour <= 7 or hour >= 18 else 1.0)
 
-def generate_solar_forecast(weather_forecast_data, historical_pattern):
+def generate_solar_forecast(weather_data, pattern):
     forecast = []
-    hourly_weather = get_hourly_weather_forecast(weather_forecast_data, FORECAST_HOURS)
-    max_possible_generation = TOTAL_SOLAR_CAPACITY_KW * 1000
-    
-    for hour_data in hourly_weather:
-        hour_of_day = hour_data['hour']
-        if hour_of_day < 6 or hour_of_day >= 19:
-            blended_generation = 0.0
-            cloud_factor = 0.0
-            cloud_cover = 100
-            solar_radiation = 0
+    hourly = get_hourly_weather_forecast(weather_data, FORECAST_HOURS)
+    max_gen = TOTAL_SOLAR_CAPACITY_KW * 1000
+    for d in hourly:
+        h = d['hour']
+        if h < 6 or h >= 19:
+            est = 0.0
         else:
-            cloud_cover = hour_data['cloud_cover']
-            solar_radiation = hour_data['solar_radiation']
-            cloud_factor = max(0.1, (1 - (cloud_cover / 100)) ** 1.5)
-            theoretical_generation = (solar_radiation / 1000) * max_possible_generation * SOLAR_EFFICIENCY_FACTOR
-            curve_adjusted_generation = apply_solar_curve(theoretical_generation, hour_of_day)
-            
-            if historical_pattern:
-                pattern_factor = 0.0
-                for pattern_hour, normalized in historical_pattern:
-                    if pattern_hour == hour_of_day:
-                        pattern_factor = normalized
-                        break
-                blended_generation = (curve_adjusted_generation * 0.6 + (pattern_factor * max_possible_generation) * 0.4)
-            else:
-                blended_generation = curve_adjusted_generation
-        
-        forecast.append({
-            'time': hour_data['time'],
-            'hour': hour_of_day,
-            'estimated_generation': max(0, blended_generation),
-            'cloud_cover': cloud_cover,
-            'solar_radiation': solar_radiation,
-            'cloud_factor': cloud_factor
-        })
+            theo = (d['solar_radiation'] / 1000) * max_gen * SOLAR_EFFICIENCY_FACTOR
+            curved = apply_solar_curve(theo, h)
+            if pattern:
+                p_val = next((v for ph, v in pattern if ph == h), 0)
+                est = (curved * 0.6 + (p_val * max_gen) * 0.4)
+            else: est = curved
+        forecast.append({'time': d['time'], 'hour': h, 'estimated_generation': max(0, est)})
     return forecast
 
-def get_default_load_for_hour(hour):
-    if 0 <= hour < 5: return 600
-    if 5 <= hour < 8: return 1800
-    if 8 <= hour < 17: return 1200
-    if 17 <= hour < 22: return 2800
-    return 1000
+def calculate_moving_average_load(mins=45):
+    cutoff = datetime.now(EAT) - timedelta(minutes=mins)
+    recent = [p for t, p in load_history if t >= cutoff]
+    return sum(recent) / len(recent) if recent else 0
 
-def calculate_moving_average_load(history_minutes=45):
-    now = datetime.now(EAT)
-    cutoff = now - timedelta(minutes=history_minutes)
-    recent_loads = [power for time, power in load_history if time >= cutoff]
-    return sum(recent_loads) / len(recent_loads) if recent_loads else 0
-
-def generate_load_forecast(historical_pattern, moving_avg_load=0):
+def generate_load_forecast(pattern, current_avg=0):
     forecast = []
     now = datetime.now(EAT)
-    
-    for hour_offset in range(FORECAST_HOURS):
-        forecast_time = now + timedelta(hours=hour_offset)
-        hour_of_day = forecast_time.hour
-        base_load = 0
-        found = False
-        if historical_pattern:
-            for pattern_hour, _, actual_load in historical_pattern:
-                if pattern_hour == hour_of_day:
-                    base_load = actual_load
-                    found = True
-                    break
-        if not found: base_load = get_default_load_for_hour(hour_of_day)
+    for i in range(FORECAST_HOURS):
+        ft = now + timedelta(hours=i)
+        h = ft.hour
+        base = 1000
+        if pattern:
+            match = next((l for ph, _, l in pattern if ph == h), None)
+            if match is not None: base = match
+        else:
+            if 0 <= h < 5: base = 600
+            elif 5 <= h < 8: base = 1800
+            elif 8 <= h < 17: base = 1200
+            elif 17 <= h < 22: base = 2800
         
-        is_spike = False
-        if moving_avg_load > 0 and base_load > 0 and moving_avg_load > (base_load * 1.5): is_spike = True
-        
-        if moving_avg_load > 0:
-            if hour_offset == 0: final_load = (moving_avg_load * 0.8) + (base_load * 0.2)
-            elif hour_offset == 1: final_load = (moving_avg_load * 0.3) + (base_load * 0.7) if is_spike else (moving_avg_load * 0.5) + (base_load * 0.5)
-            elif hour_offset == 2: final_load = base_load if is_spike else (moving_avg_load * 0.2) + (base_load * 0.8)
-            else: final_load = base_load
-        else: final_load = base_load
-            
-        forecast.append({'time': forecast_time, 'hour': hour_of_day, 'estimated_load': final_load})
+        is_spike = current_avg > (base * 1.5)
+        if current_avg > 0:
+            if i == 0: val = (current_avg * 0.8) + (base * 0.2)
+            elif i == 1: val = (current_avg * 0.3) + (base * 0.7) if is_spike else (current_avg * 0.5) + (base * 0.5)
+            elif i == 2: val = base if is_spike else (current_avg * 0.2) + (base * 0.8)
+            else: val = base
+        else: val = base
+        forecast.append({'time': ft, 'hour': h, 'estimated_load': val})
     return forecast
 
-# ----------------------------
-# Cascade Simulation
-# ----------------------------
-def calculate_battery_cascade(solar_forecast_data, load_forecast_data, current_primary_percent, backup_active=False):
-    if not solar_forecast_data or not load_forecast_data: return None
+def calculate_battery_cascade(solar, load, p_pct, b_active=False):
+    if not solar or not load: return None
     
-    p_wh_total = (current_primary_percent / 100.0) * PRIMARY_BATTERY_CAPACITY_WH
-    p_usable_daily_wh = max(0, p_wh_total - 12000) 
+    p_daily_wh = max(0, ((p_pct/100)*30000) - 12000)
+    b_wh = max(0, (21000 * 0.9) - 4200)
     
-    b_wh_total = BACKUP_BATTERY_DEGRADED_WH * 0.9 
-    b_usable_wh = max(0, b_wh_total - 4200) 
+    trace = [((p_daily_wh + b_wh) / 34800) * 100]
+    gen_needed, empty_time, switch_occurred = False, None, False
+    acc_gen_wh = 0
     
-    current_system_wh = p_usable_daily_wh + b_usable_wh
-    trace_total_pct = [(current_system_wh / TOTAL_SYSTEM_USABLE_WH) * 100]
-    
-    limit = min(len(solar_forecast_data), len(load_forecast_data))
-    generator_needed = False
-    time_empty = None
-    switchover_occurred = False
-    accumulated_genset_wh = 0
-    
-    for i in range(limit):
-        solar = solar_forecast_data[i]['estimated_generation']
-        load = load_forecast_data[i]['estimated_load']
-        time_str = solar_forecast_data[i]['time'].strftime("%I:%M %p")
-        net_watts = load - solar
-        energy_step_wh = net_watts * 1.0 
+    for i in range(min(len(solar), len(load))):
+        net = load[i]['estimated_load'] - solar[i]['estimated_generation']
+        step = net * 1.0
         
-        if energy_step_wh > 0:
-            if p_usable_daily_wh >= energy_step_wh:
-                p_usable_daily_wh -= energy_step_wh
+        if step > 0:
+            if p_daily_wh >= step: p_daily_wh -= step
             else:
-                remaining_deficit = energy_step_wh - p_usable_daily_wh
-                p_usable_daily_wh = 0
-                switchover_occurred = True
-                if b_usable_wh >= remaining_deficit:
-                    b_usable_wh -= remaining_deficit
+                rem = step - p_daily_wh
+                p_daily_wh = 0
+                switch_occurred = True
+                if b_wh >= rem: b_wh -= rem
                 else:
-                    b_usable_wh = 0
-                    generator_needed = True
-                    accumulated_genset_wh += (remaining_deficit - b_usable_wh)
-                    if time_empty is None: time_empty = time_str
+                    b_wh = 0
+                    gen_needed = True
+                    acc_gen_wh += (rem - b_wh)
+                    if not empty_time: empty_time = solar[i]['time'].strftime("%I:%M %p")
         else:
-            surplus = abs(energy_step_wh)
-            space_p = 18000 - p_usable_daily_wh
-            if surplus <= space_p: p_usable_daily_wh += surplus
+            surplus = abs(step)
+            space_p = 18000 - p_daily_wh
+            if surplus <= space_p: p_daily_wh += surplus
             else:
-                p_usable_daily_wh = 18000
+                p_daily_wh = 18000
                 surplus -= space_p
-                space_b = 16800 - b_usable_wh
-                if surplus <= space_b: b_usable_wh += surplus
-                else: b_usable_wh = 16800
+                if surplus <= (16800 - b_wh): b_wh += surplus
+                else: b_wh = 16800
         
-        pct = ((p_usable_daily_wh + b_usable_wh) / TOTAL_SYSTEM_USABLE_WH) * 100
-        trace_total_pct.append(pct)
-        
-    return {
-        'trace_total_pct': trace_total_pct,
-        'generator_needed': generator_needed,
-        'time_empty': time_empty,
-        'switchover_occurred': switchover_occurred,
-        'genset_hours': accumulated_genset_wh / 5000 
-    }
-
-def update_solar_pattern(current_generation):
-    now = datetime.now(EAT)
-    hour = now.hour
-    clean_generation = 0.0 if (hour < 6 or hour >= 19) else current_generation
-    solar_generation_pattern.append({'timestamp': now, 'hour': hour, 'generation': clean_generation, 'max_possible': TOTAL_SOLAR_CAPACITY_KW * 1000})
-
-def update_load_pattern(current_load):
-    now = datetime.now(EAT)
-    load_demand_pattern.append({'timestamp': now, 'hour': now.hour, 'load': current_load})
+        trace.append(((p_daily_wh + b_wh) / 34800) * 100)
+    
+    return {'trace_total_pct': trace, 'generator_needed': gen_needed, 'time_empty': empty_time, 'switchover_occurred': switch_occurred, 'genset_hours': acc_gen_wh/5000}
 
 # ----------------------------
-# Email function
+# Updates & Email
 # ----------------------------
-def send_email(subject, html_content, alert_type="general", send_via_email=True):
+def update_patterns(solar, load):
+    now = datetime.now(EAT)
+    h = now.hour
+    clean_s = 0.0 if (h < 6 or h >= 19) else solar
+    solar_generation_pattern.append({'timestamp': now, 'hour': h, 'generation': clean_s, 'max_possible': 10000})
+    load_demand_pattern.append({'timestamp': now, 'hour': h, 'load': load})
+
+def send_email(subject, html, alert_type="general", send_via_email=True):
     global last_alert_time, alert_history
-    cooldown_map = {
-        "critical": 60, "very_high_load": 30, "backup_active": 120, "high_load": 60,
-        "moderate_load": 120, "warning": 120, "communication_lost": 60, "fault_alarm": 30,
-        "high_temperature": 60, "test": 0, "general": 120
-    }
-    cooldown_minutes = cooldown_map.get(alert_type, 120)
+    cooldown = 120
+    if "critical" in alert_type: cooldown = 60
+    elif "very_high" in alert_type: cooldown = 30
     
-    if alert_type in last_alert_time and cooldown_minutes > 0:
-        if datetime.now(EAT) - last_alert_time[alert_type] < timedelta(minutes=cooldown_minutes):
-            return False
-    
-    action_successful = False
+    if alert_type in last_alert_time and (datetime.now(EAT) - last_alert_time[alert_type]) < timedelta(minutes=cooldown):
+        return False
+        
+    success = False
     if send_via_email and all([RESEND_API_KEY, SENDER_EMAIL, RECIPIENT_EMAIL]):
         try:
-            response = requests.post(
-                "https://api.resend.com/emails",
-                headers={"Authorization": f"Bearer {RESEND_API_KEY}", "Content-Type": "application/json"},
-                json={"from": SENDER_EMAIL, "to": [RECIPIENT_EMAIL], "subject": subject, "html": html_content}
-            )
-            if response.status_code == 200: action_successful = True
-        except Exception as e: print(f"✗ Error sending email: {e}")
-    else:
-        print(f"ℹ️ Alert logged to Dashboard: {subject}")
-        action_successful = True
-
-    if action_successful:
+            r = requests.post("https://api.resend.com/emails", headers={"Authorization": f"Bearer {RESEND_API_KEY}"}, json={"from": SENDER_EMAIL, "to": [RECIPIENT_EMAIL], "subject": subject, "html": html})
+            if r.status_code == 200: success = True
+        except: pass
+    else: success = True # Dashboard only
+    
+    if success:
         now = datetime.now(EAT)
         last_alert_time[alert_type] = now
         alert_history.append({"timestamp": now, "type": alert_type, "subject": subject})
-        cutoff = now - timedelta(hours=12)
-        alert_history[:] = [a for a in alert_history if a['timestamp'] >= cutoff]
+        alert_history[:] = [a for a in alert_history if a['timestamp'] >= (now - timedelta(hours=12))]
         return True
     return False
 
-# ----------------------------
-# Alert Logic
-# ----------------------------
-def check_and_send_alerts(inverter_data, solar_conditions, total_solar_input, total_battery_discharge, generator_running):
-    inv1 = next((i for i in inverter_data if i['SN'] == 'RKG3B0400T'), None)
-    inv2 = next((i for i in inverter_data if i['SN'] == 'KAM4N5W0AG'), None)
-    inv3_backup = next((i for i in inverter_data if i['SN'] == 'JNK1CDR0KQ'), None)
-    if not all([inv1, inv2, inv3_backup]): return
+def check_alerts(inv_data, solar, total_solar, bat_discharge, gen_run):
+    inv1 = next((i for i in inv_data if i['SN'] == 'RKG3B0400T'), None)
+    inv2 = next((i for i in inv_data if i['SN'] == 'KAM4N5W0AG'), None)
+    inv3 = next((i for i in inv_data if i['SN'] == 'JNK1CDR0KQ'), None)
+    if not all([inv1, inv2, inv3]): return
     
-    primary_capacity = min(inv1['Capacity'], inv2['Capacity'])
-    backup_voltage = inv3_backup['vBat']
-    backup_active = inv3_backup['OutputPower'] > 50
-    total_load = inv1['OutputPower'] + inv2['OutputPower'] + inv3_backup['OutputPower']
+    p_cap = min(inv1['Capacity'], inv2['Capacity'])
+    b_active = inv3['OutputPower'] > 50
+    b_volt = inv3['vBat']
     
-    for inv in inverter_data:
-        if inv.get('communication_lost', False): send_email(f"⚠️ Communication Lost: {inv['Label']}", "Check inverter.", "communication_lost")
-        if inv.get('has_fault', False): send_email(f"🚨 FAULT ALARM: {inv['Label']}", "Inverter fault.", "fault_alarm")
-        if inv.get('high_temperature', False): send_email(f"🌡️ HIGH TEMPERATURE: {inv['Label']}", f"Temp: {inv.get('temperature',0)}", "high_temperature")
-    
-    if generator_running or backup_voltage < BACKUP_VOLTAGE_THRESHOLD:
-        send_email("🚨 CRITICAL: Generator Running - Backup Battery Critical", "Action Required.", "critical")
+    for inv in inv_data:
+        if inv.get('communication_lost'): send_email(f"⚠️ Comm Lost: {inv['Label']}", "Check inverter", "communication_lost")
+        if inv.get('has_fault'): send_email(f"🚨 FAULT: {inv['Label']}", "Fault code", "fault_alarm")
+        if inv.get('high_temperature'): send_email(f"🌡️ High Temp: {inv['Label']}", f"Temp: {inv['temperature']}", "high_temperature")
+        
+    if gen_run or b_volt < 51.2:
+        send_email("🚨 CRITICAL: Generator Running", "Backup critical", "critical")
         return
-    
-    if backup_active and primary_capacity < PRIMARY_BATTERY_THRESHOLD:
-        send_email("⚠️ HIGH ALERT: Backup Inverter Active", "Reduce Load.", "backup_active")
+    if b_active and p_cap < 40:
+        send_email("⚠️ HIGH ALERT: Backup Active", "Reduce Load", "backup_active")
         return
+    if 40 < p_cap < 50:
+        send_email("⚠️ Primary Low", "Reduce Load", "warning", send_via_email=b_active)
     
-    if 40 < primary_capacity < 50:
-        send_email("⚠️ WARNING: Primary Battery Low", "Reduce Load.", "warning", send_via_email=backup_active)
-    
-    if total_battery_discharge >= 4500:
-        send_email("🚨 URGENT: Very High Battery Discharge", "Critical Discharge.", "very_high_load", send_via_email=backup_active)
-    elif 2500 <= total_battery_discharge < 3500:
-        send_email("⚠️ WARNING: High Battery Discharge", "High Discharge.", "high_load", send_via_email=backup_active)
-    elif 1500 <= total_battery_discharge < 2000 and primary_capacity < 50:
-        send_email("ℹ️ INFO: Moderate Battery Discharge - Low Battery", "Moderate Discharge.", "moderate_load", send_via_email=backup_active)
+    if bat_discharge >= 4500: send_email("🚨 URGENT: High Discharge", "Critical", "very_high_load", send_via_email=b_active)
+    elif 2500 <= bat_discharge < 3500: send_email("⚠️ High Discharge", "Warning", "high_load", send_via_email=b_active)
+    elif 1500 <= bat_discharge < 2000 and p_cap < 50: send_email("ℹ️ Moderate Discharge", "Info", "moderate_load", send_via_email=b_active)
 
 # ----------------------------
 # Polling Loop
@@ -542,529 +399,369 @@ def poll_growatt():
     global latest_data, load_history, battery_history, weather_forecast, last_communication, solar_conditions_cache
     weather_forecast = get_weather_forecast()
     if weather_forecast: solar_conditions_cache = analyze_solar_conditions(weather_forecast)
-    last_weather_update = datetime.now(EAT)
+    last_wx = datetime.now(EAT)
     
     while True:
         try:
             now = datetime.now(EAT)
-            cutoff_time = now - timedelta(hours=12)
-            alert_history[:] = [a for a in alert_history if a['timestamp'] >= cutoff_time]
+            alert_history[:] = [a for a in alert_history if a['timestamp'] >= (now - timedelta(hours=12))]
             
-            if now - last_weather_update > timedelta(minutes=30):
+            if (now - last_wx) > timedelta(minutes=30):
                 weather_forecast = get_weather_forecast()
                 if weather_forecast: solar_conditions_cache = analyze_solar_conditions(weather_forecast)
-                last_weather_update = now
-            
-            total_output_power, total_battery_discharge_W, total_solar_input_W = 0, 0, 0
-            inverter_data, primary_capacities = [], []
-            backup_data, generator_running = None, False
+                last_wx = now
+                
+            tot_out, tot_bat, tot_sol = 0, 0, 0
+            inv_data, p_caps = [], []
+            b_data, gen_on = None, False
             
             for sn in SERIAL_NUMBERS:
                 try:
-                    response = requests.post(API_URL, data={"storage_sn": sn}, headers=headers, timeout=20)
-                    response.raise_for_status()
-                    data = response.json().get("data", {})
+                    r = requests.post(API_URL, data={"storage_sn": sn}, headers=headers, timeout=20)
+                    r.raise_for_status()
+                    d = r.json().get("data", {})
                     last_communication[sn] = now
-                    config = INVERTER_CONFIG.get(sn, {"label": sn, "type": "unknown", "display_order": 99})
+                    cfg = INVERTER_CONFIG.get(sn, {"label": sn, "type": "unknown", "display_order": 99})
                     
-                    out_power = float(data.get("outPutPower") or 0)
-                    capacity = float(data.get("capacity") or 0)
-                    v_bat = float(data.get("vBat") or 0)
-                    p_bat = float(data.get("pBat") or 0)
-                    ppv = float(data.get("ppv") or 0) + float(data.get("ppv2") or 0)
+                    op = float(d.get("outPutPower") or 0)
+                    cap = float(d.get("capacity") or 0)
+                    vb = float(d.get("vBat") or 0)
+                    pb = float(d.get("pBat") or 0)
+                    sol = float(d.get("ppv") or 0) + float(d.get("ppv2") or 0)
+                    tmp = max(float(d.get("invTemperature") or 0), float(d.get("dcDcTemperature") or 0), float(d.get("temperature") or 0))
+                    flt = int(d.get("errorCode") or 0) != 0
                     
-                    temp = max(float(data.get("invTemperature") or 0), float(data.get("dcDcTemperature") or 0), float(data.get("temperature") or 0))
+                    tot_out += op
+                    tot_sol += sol
+                    if pb > 0: tot_bat += pb
                     
-                    has_fault = int(data.get("errorCode") or 0) != 0 or int(data.get("faultCode") or 0) != 0
-                    
-                    vac = float(data.get("vac") or 0)
-                    pac_input = float(data.get("pAcInPut") or 0)
-                    
-                    total_output_power += out_power
-                    total_solar_input_W += ppv
-                    if p_bat > 0: total_battery_discharge_W += p_bat
-                    
-                    inv_info = {
-                        "SN": sn, "Label": config['label'], "Type": config['type'], "DisplayOrder": config['display_order'],
-                        "OutputPower": out_power, "Capacity": capacity, "vBat": v_bat, "pBat": p_bat, "ppv": ppv,
-                        "temperature": temp, "high_temperature": temp >= INVERTER_TEMP_WARNING, "Status": data.get("statusText", "Unknown"),
-                        "has_fault": has_fault, "fault_info": {"errorCode": int(data.get("errorCode") or 0), "faultCode": int(data.get("faultCode") or 0)},
-                        "communication_lost": False, "last_seen": now.strftime("%Y-%m-%d %H:%M:%S")
+                    info = {
+                        "SN": sn, "Label": cfg['label'], "Type": cfg['type'], "DisplayOrder": cfg['display_order'],
+                        "OutputPower": op, "Capacity": cap, "vBat": vb, "pBat": pb, "ppv": sol, "temperature": tmp,
+                        "high_temperature": tmp >= 60, "Status": d.get("statusText", "Unknown"), "has_fault": flt,
+                        "last_seen": now.strftime("%Y-%m-%d %H:%M:%S"), "communication_lost": False
                     }
-                    inverter_data.append(inv_info)
+                    inv_data.append(info)
                     
-                    if config['type'] == 'primary' and capacity > 0: primary_capacities.append(capacity)
-                    elif config['type'] == 'backup':
-                        backup_data = inv_info
-                        if vac > 100 or pac_input > 50: generator_running = True
+                    if cfg['type'] == 'primary' and cap > 0: p_caps.append(cap)
+                    elif cfg['type'] == 'backup':
+                        b_data = info
+                        if float(d.get("vac") or 0) > 100 or float(d.get("pAcInPut") or 0) > 50: gen_on = True
                 except:
-                    if sn in last_communication and now - last_communication[sn] > timedelta(minutes=COMMUNICATION_TIMEOUT_MINUTES):
-                        config = INVERTER_CONFIG.get(sn, {})
-                        inverter_data.append({"SN": sn, "Label": config.get('label', sn), "Type": config.get('type'), "DisplayOrder": config.get('display_order', 99), "communication_lost": True})
+                    if sn in last_communication and (now - last_communication[sn]) > timedelta(minutes=10):
+                        cfg = INVERTER_CONFIG.get(sn, {})
+                        inv_data.append({"SN": sn, "Label": cfg.get('label', sn), "Type": cfg.get('type'), "DisplayOrder": 99, "communication_lost": True})
             
-            inverter_data.sort(key=lambda x: x.get('DisplayOrder', 99))
-            update_solar_pattern(total_solar_input_W)
-            update_load_pattern(total_output_power)
+            inv_data.sort(key=lambda x: x.get('DisplayOrder', 99))
+            update_patterns(tot_sol, tot_out)
             
-            load_history.append((now, total_output_power))
-            load_history[:] = [(t, p) for t, p in load_history if t >= now - timedelta(hours=12)]
-            battery_history.append((now, total_battery_discharge_W))
-            battery_history[:] = [(t, p) for t, p in battery_history if t >= now - timedelta(hours=12)]
+            load_history.append((now, tot_out))
+            load_history[:] = [(t, p) for t, p in load_history if t >= (now - timedelta(hours=12))]
+            battery_history.append((now, tot_bat))
+            battery_history[:] = [(t, p) for t, p in battery_history if t >= (now - timedelta(hours=12))]
             
-            solar_pattern = analyze_historical_solar_pattern()
-            load_pattern = analyze_historical_load_pattern()
+            s_pat = analyze_historical_solar_pattern()
+            l_pat = analyze_historical_load_pattern()
+            s_cast = generate_solar_forecast(weather_forecast, s_pat)
+            avg_load = calculate_moving_average_load(45)
+            l_cast = generate_load_forecast(l_pat, avg_load)
             
-            solar_forecast = generate_solar_forecast(weather_forecast, solar_pattern)
-            moving_avg_load = calculate_moving_average_load(45)
-            load_forecast = generate_load_forecast(load_pattern, moving_avg_load)
+            p_min = min(p_caps) if p_caps else 0
+            b_volts = b_data['vBat'] if b_data else 0
+            b_act = b_data['OutputPower'] > 50 if b_data else False
+            b_pct = max(0, min(100, (b_volts - 51.0) / 2.0 * 100))
+            b_kwh = (b_pct / 100) * 21.0
             
-            primary_battery_min = min(primary_capacities) if primary_capacities else 0
-            backup_battery_voltage = backup_data['vBat'] if backup_data else 0
-            backup_voltage_status, backup_voltage_color = get_backup_voltage_status(backup_battery_voltage)
-            backup_active = backup_data['OutputPower'] > 50 if backup_data else False
-            
-            backup_percent_calc = max(0, min(100, (backup_battery_voltage - 51.0) / 2.0 * 100))
-            backup_kwh_calc = (backup_percent_calc / 100) * (BACKUP_BATTERY_DEGRADED_WH / 1000)
-            
-            battery_life_prediction = calculate_battery_cascade(solar_forecast, load_forecast, primary_battery_min, backup_active)
+            pred = calculate_battery_cascade(s_cast, l_cast, p_min, b_act)
             
             latest_data = {
                 "timestamp": now.strftime("%Y-%m-%d %H:%M:%S EAT"),
-                "total_output_power": total_output_power,
-                "total_battery_discharge_W": total_battery_discharge_W,
-                "total_solar_input_W": total_solar_input_W,
-                "primary_battery_min": primary_battery_min,
-                "backup_battery_voltage": backup_battery_voltage,
-                "backup_voltage_status": backup_voltage_status,
-                "backup_voltage_color": backup_voltage_color,
-                "backup_active": backup_active,
-                "backup_percent_calc": backup_percent_calc,
-                "backup_kwh_calc": backup_kwh_calc,
-                "generator_running": generator_running,
-                "inverters": inverter_data,
-                "solar_forecast": solar_forecast,
-                "load_forecast": load_forecast,
-                "battery_life_prediction": battery_life_prediction,
-                "historical_pattern_count": len(solar_generation_pattern),
-                "load_pattern_count": len(load_demand_pattern)
+                "total_output_power": tot_out,
+                "total_battery_discharge_W": tot_bat,
+                "total_solar_input_W": tot_sol,
+                "primary_battery_min": p_min,
+                "backup_battery_voltage": b_volts,
+                "backup_voltage_status": get_backup_voltage_status(b_volts)[0],
+                "backup_active": b_act,
+                "backup_percent_calc": b_pct,
+                "backup_kwh_calc": b_kwh,
+                "generator_running": gen_on,
+                "inverters": inv_data,
+                "solar_forecast": s_cast,
+                "battery_life_prediction": pred
             }
             
-            print(f"{latest_data['timestamp']} | Load={total_output_power:.0f}W | Solar={total_solar_input_W:.0f}W")
-            check_and_send_alerts(inverter_data, solar_conditions_cache, total_solar_input_W, total_battery_discharge_W, generator_running)
-        except Exception as e: print(f"❌ Error in polling: {e}")
+            print(f"{latest_data['timestamp']} | Load={tot_out:.0f}W | Solar={tot_sol:.0f}W")
+            check_alerts(inv_data, solar_conditions_cache, tot_sol, tot_bat, gen_on)
+        except Exception as e: print(f"Error in polling: {e}")
         time.sleep(POLL_INTERVAL_MINUTES * 60)
 
 # ----------------------------
-# Flask Web Routes
+# Web Interface
 # ----------------------------
 @app.route("/")
 def home():
-    # Data Extraction
-    primary_battery = latest_data.get("primary_battery_min", 0)
-    backup_voltage = latest_data.get("backup_battery_voltage", 0)
-    backup_voltage_status = latest_data.get("backup_voltage_status", "Unknown") # Extracted correctly
-    backup_active = latest_data.get("backup_active", False)
-    generator_running = latest_data.get("generator_running", False)
-    total_load = latest_data.get("total_output_power", 0)
-    total_solar = latest_data.get("total_solar_input_W", 0)
-    total_battery_discharge = latest_data.get("total_battery_discharge_W", 0)
+    # 1. Prepare Data
+    p_bat = latest_data.get("primary_battery_min", 0)
+    b_volt = latest_data.get("backup_battery_voltage", 0)
+    b_stat = latest_data.get("backup_voltage_status", "Unknown")
+    b_active = latest_data.get("backup_active", False)
+    gen_on = latest_data.get("generator_running", False)
+    tot_load = latest_data.get("total_output_power", 0)
+    tot_sol = latest_data.get("total_solar_input_W", 0)
+    tot_dis = latest_data.get("total_battery_discharge_W", 0)
     
-    primary_kwh_real = (primary_battery / 100.0) * (PRIMARY_BATTERY_CAPACITY_WH / 1000.0)
-    backup_percent_display = latest_data.get("backup_percent_calc", 0)
-    backup_kwh_display = latest_data.get("backup_kwh_calc", 0)
+    p_kwh = (p_bat / 100.0) * 30.0
+    b_pct = latest_data.get("backup_percent_calc", 0)
+    b_kwh = latest_data.get("backup_kwh_calc", 0)
     
-    # 1. Appliance Safety Status
-    if generator_running:
-        app_status = "CRITICAL: GENERATOR ON"
-        app_sub = "Stop ALL non-essential loads immediately"
-        app_color = "critical"
-    elif backup_active:
-        app_status = "❌ STOP HEAVY LOADS"
-        app_sub = "Backup Battery is Active. Save power."
-        app_color = "critical"
-    elif primary_battery < 45 and total_solar < total_load:
-        app_status = "⚠️ REDUCE LOADS"
-        app_sub = "Primary Battery Low & Discharging."
-        app_color = "warning"
-    elif total_solar > (total_load + 500):
-        app_status = "✅ OVEN/KETTLE SAFE"
-        app_sub = "Solar is covering consumption."
-        app_color = "good"
+    # 2. Status Logic
+    if gen_on:
+        app_st, app_sub, app_col = "CRITICAL: GENERATOR ON", "Stop all non-essential loads", "critical"
+    elif b_active:
+        app_st, app_sub, app_col = "❌ STOP HEAVY LOADS", "Backup Active. Save power.", "critical"
+    elif p_bat < 45 and tot_sol < tot_load:
+        app_st, app_sub, app_col = "⚠️ REDUCE LOADS", "Primary Low & Discharging", "warning"
+    elif tot_sol > (tot_load + 500):
+        app_st, app_sub, app_col = "✅ OVEN/KETTLE SAFE", "Solar covering consumption", "good"
     else:
-        app_status = "ℹ️ MONITOR USAGE"
-        app_sub = "System running normally."
-        app_color = "normal"
-
-    # 2. Net Flow Visual
-    net_watts = total_solar - total_load
-    if net_watts > 100:
-        flow_text = f"Charging (+{net_watts:.0f}W)"
-        flow_color = "#28a745" # Green
-        flow_icon = "⚡🔋"
-    elif net_watts < -100:
-        flow_text = f"Draining ({net_watts:.0f}W)"
-        flow_color = "#dc3545" # Red
-        flow_icon = "🔋🔻"
-    else:
-        flow_text = "Balanced"
-        flow_color = "#17a2b8"
-        flow_icon = "⚖️"
-
-    # 3. Solar Badge
-    solar_cond = solar_conditions_cache
-    if solar_cond and solar_cond['poor_conditions']:
-        weather_badge = "☁️ Low Solar Day"
-        weather_class = "poor"
-    else:
-        weather_badge = "☀️ High Solar Day"
-        weather_class = "good"
-
-    # Chart & Prediction Data
-    battery_life_prediction = latest_data.get("battery_life_prediction")
-    sim_times = ["Now"] + [d['time'].strftime('%H:%M') for d in latest_data.get("solar_forecast", [])]
-    trace_total_pct = []
+        app_st, app_sub, app_col = "ℹ️ MONITOR USAGE", "System running normally", "normal"
+        
+    net = tot_sol - tot_load
+    if net > 100: flow_txt, flow_col, flow_icn = f"Charging (+{net:.0f}W)", "#28a745", "⚡🔋"
+    elif net < -100: flow_txt, flow_col, flow_icn = f"Draining ({net:.0f}W)", "#dc3545", "🔋🔻"
+    else: flow_txt, flow_col, flow_icn = "Balanced", "#17a2b8", "⚖️"
     
-    # 4 & 5. Prediction Message & Gen Runtime
-    pred_message = "Analyzing..."
-    gen_hours = 0
-    if battery_life_prediction:
-        trace_total_pct = battery_life_prediction.get('trace_total_pct', [])
-        if battery_life_prediction.get('generator_needed'):
-            gen_hours = battery_life_prediction.get('genset_hours', 0)
-            pred_message = f"Gen Runtime: {gen_hours:.1f} Hours"
-            pred_class = "critical"
-        elif battery_life_prediction.get('switchover_occurred'):
-            pred_message = "Will switch to Backup"
-            pred_class = "warning"
+    sol_cond = solar_conditions_cache
+    w_bdg, w_cls = ("☁️ Low Solar Day", "poor") if sol_cond and sol_cond['poor_conditions'] else ("☀️ High Solar Day", "good")
+    
+    # 3. Chart Data Preparation
+    times = [t.strftime('%H:%M') for t, p in load_history]
+    l_vals = [p for t, p in load_history]
+    b_vals = [p for t, p in battery_history]
+    
+    pred = latest_data.get("battery_life_prediction")
+    sim_t = ["Now"] + [d['time'].strftime('%H:%M') for d in latest_data.get("solar_forecast", [])]
+    trace_pct = []
+    pred_msg, pred_cls = "Analyzing...", "good"
+    
+    if pred:
+        trace_pct = pred.get('trace_total_pct', [])
+        if pred.get('generator_needed'):
+            pred_msg = f"Gen Runtime: {pred.get('genset_hours', 0):.1f} Hours"
+            pred_cls = "critical"
+        elif pred.get('switchover_occurred'):
+            pred_msg, pred_cls = "Will switch to Backup", "warning"
         else:
-            pred_message = "Battery Sufficient"
-            pred_class = "good"
-    
-    # 6. Load Speedometer (Scaled to Alert Levels)
-    # Scale bar to 5000W so alerts look impactful
-    visual_max = 5000
-    load_pct = min(100, (total_load / visual_max) * 100)
-    
-    # Alert Limits: 1500 (Moderate), 2500 (High), 4500 (Critical)
-    if total_load < 1500:
-        load_color = "#28a745" # Green
-        load_msg = "Normal Usage"
-    elif total_load < 2500:
-        load_color = "#ffc107" # Yellow/Orange
-        load_msg = "Moderate Load"
-    elif total_load < 4500:
-        load_color = "#fd7e14" # Orange
-        load_msg = "High Load"
-    else:
-        load_color = "#dc3545" # Red
-        load_msg = "CRITICAL LOAD"
+            pred_msg, pred_cls = "Battery Sufficient", "good"
+            
+    # Load Speedometer Scale
+    vis_max = 5000
+    l_pct = min(100, (tot_load / vis_max) * 100)
+    if tot_load < 1500: l_col, l_msg = "#28a745", "Normal"
+    elif tot_load < 2500: l_col, l_msg = "#ffc107", "Moderate"
+    elif tot_load < 4500: l_col, l_msg = "#fd7e14", "High"
+    else: l_col, l_msg = "#dc3545", "CRITICAL"
 
+    # 4. Generate HTML
     html = f"""
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Tulia House - Solar Monitor</title>
+    <title>Tulia House</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@2.1.0/dist/chartjs-plugin-annotation.min.js"></script>
     <style>
-        * {{ margin: 0; padding: 0; box-sizing: border-box; font-family: 'Segoe UI', sans-serif; }}
-        body {{ background: #f0f2f5; padding: 20px; }}
+        body {{ font-family: 'Segoe UI', sans-serif; background: linear-gradient(rgba(0,0,0,0.5), rgba(0,0,0,0.5)), url('https://images.unsplash.com/photo-1582268611958-ebfd161ef9cf?w=1600&q=80') center/cover fixed; margin:0; padding:20px; color:#333; }}
         .container {{ max-width: 1200px; margin: 0 auto; }}
+        .card {{ background: rgba(255,255,255,0.95); padding: 20px; border-radius: 15px; margin-bottom: 20px; box-shadow: 0 4px 15px rgba(0,0,0,0.2); backdrop-filter: blur(5px); }}
+        .header {{ text-align: center; color: white; text-shadow: 2px 2px 4px rgba(0,0,0,0.7); margin-bottom: 25px; }}
         
-        /* Top Status Bar */
-        .status-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 15px; margin-bottom: 25px; }}
-        .status-card {{ padding: 20px; border-radius: 12px; color: white; text-align: center; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }}
-        .status-card.critical {{ background: linear-gradient(135deg, #dc3545, #c82333); }}
-        .status-card.warning {{ background: linear-gradient(135deg, #fd7e14, #e67e22); }}
-        .status-card.good {{ background: linear-gradient(135deg, #28a745, #218838); }}
-        .status-card.normal {{ background: linear-gradient(135deg, #17a2b8, #138496); }}
+        .status-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 15px; margin-bottom: 20px; }}
+        .st-card {{ padding: 20px; border-radius: 12px; color: white; text-align: center; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }}
+        .st-card.critical {{ background: linear-gradient(135deg, #dc3545, #c82333); }}
+        .st-card.warning {{ background: linear-gradient(135deg, #fd7e14, #e67e22); }}
+        .st-card.good {{ background: linear-gradient(135deg, #28a745, #218838); }}
+        .st-card.normal {{ background: linear-gradient(135deg, #17a2b8, #138496); }}
+        .st-val {{ font-size: 1.4em; font-weight: bold; margin-bottom: 5px; }}
         
-        .main-stat {{ font-size: 1.6em; font-weight: bold; margin-bottom: 5px; }}
-        .sub-stat {{ font-size: 0.9em; opacity: 0.9; }}
+        .load-bg {{ background: #eee; height: 25px; border-radius: 15px; overflow: hidden; margin: 15px 0; box-shadow: inset 0 2px 5px rgba(0,0,0,0.1); }}
+        .load-fill {{ height: 100%; transition: width 0.5s; }}
         
-        /* Dashboard Cards */
-        .card {{ background: white; padding: 25px; border-radius: 15px; margin-bottom: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.05); }}
-        h2 {{ color: #444; margin-bottom: 15px; font-size: 1.3em; }}
+        .batt-row {{ display: flex; gap: 20px; flex-wrap: wrap; }}
+        .batt-col {{ flex: 1; min-width: 300px; border: 1px solid #ddd; padding: 15px; border-radius: 10px; background: #fff; }}
+        .b-vis {{ height: 35px; background: #eee; border-radius: 18px; margin: 15px 0; position: relative; overflow: hidden; box-shadow: inset 0 2px 5px rgba(0,0,0,0.2); }}
+        .b-fill {{ height: 100%; transition: width 1s; position: absolute; top:0; right:0; background: #eee; z-index: 2; border-left: 2px solid #555; }}
+        .b-bg {{ position: absolute; width:100%; height:100%; top:0; left:0; z-index: 1; }}
+        .b-mark {{ position: absolute; width:2px; height:100%; background: rgba(255,255,255,0.8); z-index: 3; top:0; }}
+        .b-txt {{ position: absolute; width:100%; text-align: center; line-height: 35px; font-weight: bold; color: white; text-shadow: 1px 1px 2px black; z-index: 4; top:0; }}
         
-        /* Load Speedometer */
-        .load-bar-bg {{ background: #eee; height: 20px; border-radius: 10px; overflow: hidden; margin: 10px 0; }}
-        .load-bar-fill {{ height: 100%; transition: width 0.5s; }}
+        .inv-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 15px; margin-top: 10px; }}
+        .inv-card {{ background: #f8f9fa; padding: 15px; border-radius: 10px; border-left: 5px solid #6c757d; font-size: 0.9em; }}
+        .inv-row {{ display: flex; justify-content: space-between; padding: 5px 0; border-bottom: 1px solid #eee; }}
         
-        /* Battery Visuals */
-        .batt-container {{ display: flex; gap: 20px; flex-wrap: wrap; }}
-        .batt-box {{ flex: 1; border: 1px solid #eee; padding: 15px; border-radius: 10px; min-width: 300px; }}
-        .batt-visual {{ height: 30px; background: #eee; border-radius: 15px; overflow: hidden; position: relative; margin: 10px 0; }}
-        .batt-fill {{ height: 100%; display: flex; align-items: center; justify-content: flex-end; padding-right: 10px; color: white; font-weight: bold; font-size: 0.8em; }}
-        .batt-zone-bg {{ position: absolute; top:0; left:0; width:100%; height:100%; z-index: 1; }}
-        .batt-mask {{ position: absolute; top:0; right:0; height:100%; background: #eee; z-index: 2; transition: width 1s; }}
-        .batt-marker {{ position: absolute; top:0; height:100%; width: 2px; background: rgba(255,255,255,0.7); z-index: 3; }}
-        .batt-text {{ position: absolute; width:100%; text-align: center; line-height: 30px; font-weight: bold; color: white; text-shadow: 1px 1px 2px black; z-index: 4; }}
-        
-        .metric-grid {{ display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-top: 15px; }}
-        .metric-box {{ background: #f8f9fa; padding: 10px; border-radius: 8px; text-align: center; }}
-        .metric-val {{ font-size: 1.2em; font-weight: bold; color: #333; }}
-        .metric-lbl {{ font-size: 0.8em; color: #666; }}
-        
-        .weather-badge {{ display: inline-block; padding: 5px 12px; border-radius: 20px; font-size: 0.9em; font-weight: bold; margin-bottom: 10px; }}
-        .weather-badge.good {{ background: #d4edda; color: #155724; }}
-        .weather-badge.poor {{ background: #f8d7da; color: #721c24; }}
-        
-        .alert-history {{ margin: 20px 0; }}
-        .alert-item {{ display: grid; grid-template-columns: 160px 1fr; gap: 15px; align-items: center; padding: 15px; border-bottom: 1px solid #eee; transition: background 0.2s; }}
-        .alert-item:hover {{ background: #f8f9fa; }}
-        .alert-item:last-child {{ border-bottom: none; }}
-        .alert-time {{ color: #666; font-size: 0.9em; font-family: monospace; }}
-        .alert-subject {{ color: #333; font-size: 0.95em; font-weight: bold; }}
+        .alert-row {{ display: grid; grid-template-columns: 100px 1fr; gap: 10px; padding: 10px; border-bottom: 1px solid #eee; font-size: 0.9em; }}
     </style>
 </head>
 <body>
     <div class="container">
-        <div style="text-align:center; margin-bottom:30px;">
-            <h1 style="color:#333;">TULIA HOUSE</h1>
-            <p style="color:#666;">Solar Monitor • {latest_data.get('timestamp','Loading...')}</p>
+        <div class="header">
+            <h1>TULIA HOUSE</h1>
+            <p>Solar Monitor • {latest_data.get('timestamp','Loading...')}</p>
         </div>
 
-        <!-- 1. Top Status Grid -->
         <div class="status-grid">
-            <!-- Appliance Safety -->
-            <div class="status-card {app_color}">
-                <div class="main-stat">{app_status}</div>
-                <div class="sub-stat">{app_sub}</div>
+            <div class="st-card {app_col}">
+                <div class="st-val">{app_st}</div>
+                <div>{app_sub}</div>
             </div>
-            
-            <!-- Prediction / Time Remaining -->
-            <div class="status-card {pred_class}">
-                <div class="main-stat">{pred_message}</div>
-                <div class="sub-stat">Forecast based on current usage</div>
+            <div class="st-card {pred_cls}">
+                <div class="st-val">{pred_msg}</div>
+                <div>Based on current usage trend</div>
             </div>
-            
-            <!-- Net Flow -->
-            <div class="status-card normal" style="background: white; color: #333; border: 2px solid {flow_color};">
-                <div class="main-stat" style="color: {flow_color}">{flow_icon} {flow_text}</div>
-                <div class="sub-stat">Battery Flow</div>
+            <div class="st-card normal" style="background:white; color:#333; border:2px solid {flow_col}">
+                <div class="st-val" style="color:{flow_col}">{flow_icn} {flow_txt}</div>
+                <div>Battery Flow</div>
             </div>
         </div>
 
-        <!-- 2. Solar & Load Context -->
         <div class="card">
             <div style="display:flex; justify-content:space-between; align-items:center;">
-                <h2>Current System Load</h2>
-                <div class="weather-badge {weather_class}">{weather_badge}</div>
+                <h2 style="margin:0">Current Load</h2>
+                <span style="background:{'#d4edda' if 'High' in w_bdg else '#f8d7da'}; padding:5px 10px; border-radius:15px; font-size:0.9em; color:{'#155724' if 'High' in w_bdg else '#721c24'}">{w_bdg}</span>
             </div>
-            
-            <!-- Load Speedometer -->
-            <div class="load-bar-bg">
-                <div class="load-bar-fill" style="width: {load_pct}%; background: {load_color};"></div>
+            <div class="load-bg">
+                <div class="load-fill" style="width: {l_pct}%; background: {l_col};"></div>
             </div>
-            <div style="display:flex; justify-content:space-between; font-size:0.9em; color:#666;">
+            <div style="display:flex; justify-content:space-between; color:#666; font-size:0.9em;">
                 <span>0W</span>
-                <span style="font-weight:bold; color:{load_color}">{total_load:.0f}W • {load_msg}</span>
-                <span>5,000W+ (Critical)</span>
+                <span style="font-weight:bold; color:{l_col}">{tot_load:.0f}W ({l_msg})</span>
+                <span>5000W+</span>
             </div>
         </div>
 
-        <!-- 3. Battery Status Gauges -->
         <div class="card">
-            <h2>Battery Status</h2>
-            <div class="batt-container">
+            <h2 style="margin-top:0">Battery Status</h2>
+            <div class="batt-row">
                 <!-- Primary -->
-                <div class="batt-box">
-                    <div style="display:flex; justify-content:space-between; margin-bottom:5px;">
-                        <strong>Primary Battery</strong>
-                        <span>{primary_battery:.0f}%</span>
+                <div class="batt-col">
+                    <div style="display:flex; justify-content:space-between;"><strong>Primary</strong> <span>{p_bat:.0f}%</span></div>
+                    <div class="b-vis">
+                        <div class="b-bg" style="background: linear-gradient(to right, black 20%, #fd7e14 20%, #fd7e14 40%, #28a745 40%);"></div>
+                        <div class="b-fill" style="width: {100 - p_bat}%"></div>
+                        <div class="b-mark" style="left:20%"></div><div class="b-mark" style="left:40%"></div>
+                        <div class="b-txt">{p_bat:.0f}%</div>
                     </div>
-                    <div class="batt-visual">
-                        <div class="batt-zone-bg" style="background: linear-gradient(to right, black 20%, #fd7e14 20%, #fd7e14 40%, #28a745 40%);"></div>
-                        <div class="batt-mask" style="width: {100 - primary_battery}%"></div>
-                        <div class="batt-marker" style="left: 20%"></div>
-                        <div class="batt-marker" style="left: 40%"></div>
-                        <div class="batt-text">{primary_battery:.0f}%</div>
-                    </div>
-                    <div class="metric-grid">
-                        <div class="metric-box">
-                            <div class="metric-val">{primary_kwh_real:.1f} kWh</div>
-                            <div class="metric-lbl">Energy Stored</div>
-                        </div>
-                        <div class="metric-box">
-                            <div class="metric-val">30 kWh</div>
-                            <div class="metric-lbl">Total Capacity</div>
-                        </div>
-                    </div>
-                    <div style="font-size:0.8em; color:#666; margin-top:5px; text-align:center;">
-                        Green: Daily | Orange: Reserve | Black: Cutoff
-                    </div>
+                    <div style="text-align:center; font-size:0.9em;"><strong>{p_kwh:.1f} kWh</strong> / 30 kWh</div>
                 </div>
-
                 <!-- Backup -->
-                <div class="batt-box">
-                    <div style="display:flex; justify-content:space-between; margin-bottom:5px;">
-                        <strong>Backup Battery</strong>
-                        <span>{backup_voltage:.1f}V</span>
+                <div class="batt-col">
+                    <div style="display:flex; justify-content:space-between;"><strong>Backup</strong> <span>{b_volt:.1f}V</span></div>
+                    <div class="b-vis">
+                        <div class="b-bg" style="background: linear-gradient(to right, black 20%, #28a745 20%);"></div>
+                        <div class="b-fill" style="width: {100 - b_pct}%"></div>
+                        <div class="b-mark" style="left:20%"></div>
+                        <div class="b-txt">{b_volt:.1f}V</div>
                     </div>
-                    <div class="batt-visual">
-                        <div class="batt-zone-bg" style="background: linear-gradient(to right, black 20%, #28a745 20%);"></div>
-                        <div class="batt-mask" style="width: {100 - backup_percent_display}%"></div>
-                        <div class="batt-marker" style="left: 20%"></div>
-                        <div class="batt-text">{backup_voltage:.1f}V</div>
-                    </div>
-                    <div class="metric-grid">
-                        <div class="metric-box">
-                            <div class="metric-val">~{backup_kwh_display:.1f} kWh</div>
-                            <div class="metric-lbl">Est. Energy</div>
-                        </div>
-                        <div class="metric-box">
-                            <div class="metric-val">{backup_voltage_status}</div>
-                            <div class="metric-lbl">Health Status</div>
-                        </div>
-                    </div>
+                    <div style="text-align:center; font-size:0.9em;"><strong>~{b_kwh:.1f} kWh</strong> ({b_stat})</div>
                 </div>
             </div>
         </div>
 
-        <!-- 4. Prediction Chart -->
         <div class="card">
-            <h2>🔋 Total System Fuel Prediction</h2>
-            <p style="color:#666; font-size:0.9em; margin-bottom:15px;">
-                One line showing total energy (Primary + Backup). <br>
-                <span style="color:#28a745">Green</span> = Normal. <span style="color:#fd7e14">Orange</span> = Backup Active. <span style="color:#dc3545">Red Line at 0%</span> = Generator Needed.
-            </p>
-            <div style="height:300px">
-                <canvas id="cascadeChart"></canvas>
-            </div>
+            <h2 style="margin-top:0">Total Fuel Prediction</h2>
+            <div style="height:300px"><canvas id="predChart"></canvas></div>
         </div>
 
-        <script>
-            // Prediction Chart
-            const ctx = document.getElementById('cascadeChart').getContext('2d');
-            
-            function getLineColor(ctx) {{
-                const val = ctx.p0.parsed.y;
-                return val < 48 ? '#fd7e14' : '#28a745'; 
-            }}
-
-            new Chart(ctx, {{
-                type: 'line',
-                data: {{
-                    labels: {json.dumps(sim_times)},
-                    datasets: [{{
-                        label: 'Total Fuel %',
-                        data: {json.dumps(trace_total_pct)},
-                        borderColor: 'gray',
-                        segment: {{ borderColor: ctx => getLineColor(ctx) }},
-                        borderWidth: 4,
-                        tension: 0.3,
-                        fill: true,
-                        backgroundColor: 'rgba(200, 200, 200, 0.1)'
-                    }}]
-                }},
-                options: {{
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    scales: {{
-                        y: {{ min: 0, max: 100, title: {{ display: true, text: 'Total Capacity (%)' }} }}
-                    }},
-                    plugins: {{
-                        annotation: {{
-                            annotations: {{
-                                switchLine: {{
-                                    type: 'line',
-                                    yMin: 48, yMax: 48,
-                                    borderColor: '#fd7e14', borderWidth: 2, borderDash: [5, 5],
-                                    label: {{ content: 'Switch to Backup', display: true, position: 'start', backgroundColor: 'rgba(253, 126, 20, 0.8)', color: 'white' }}
-                                }},
-                                genLine: {{
-                                    type: 'line',
-                                    yMin: 0, yMax: 0,
-                                    borderColor: '#dc3545', borderWidth: 3,
-                                    label: {{ content: 'GENERATOR START', display: true, position: 'center', backgroundColor: '#dc3545', color: 'white' }}
-                                }}
-                            }}
-                        }}
-                    }}
-                }}
-            }});
-        </script>
-        
-        <!-- 5. Alert History -->
         <div class="card">
-            <h2>📧 Alert History - Last 12 Hours</h2>
-            <div class="alert-history">
+            <h2 style="margin-top:0">Power History (12h)</h2>
+            <div style="height:250px"><canvas id="histChart"></canvas></div>
+        </div>
+
+        <div class="card">
+            <h2 style="margin-top:0">System Details</h2>
+            <div class="inv-grid">
 """
-    if alert_history:
-        for alert in reversed(alert_history):
-            color = "#dc3545" if "critical" in alert['type'] or "fault" in alert['type'] else "#ff9800"
-            html += f"""
-                <div class="alert-item" style="border-left: 4px solid {color}; padding-left: 10px;">
-                    <div class="alert-time">{alert['timestamp'].strftime("%H:%M")}</div>
-                    <div class="alert-subject">{alert['subject']}</div>
+    for inv in latest_data.get('inverters', []):
+        bg = "#fff3cd" if inv.get('communication_lost') else "#f8f9fa"
+        bd = "#ffc107" if inv.get('communication_lost') else "#6c757d"
+        html += f"""
+                <div class="inv-card" style="background:{bg}; border-left-color:{bd}">
+                    <div style="font-weight:bold; margin-bottom:5px;">{inv.get('Label')}</div>
+                    <div class="inv-row"><span>Power</span> <strong>{inv.get('OutputPower',0):.0f}W</strong></div>
+                    <div class="inv-row"><span>Solar</span> <strong>{inv.get('ppv',0):.0f}W</strong></div>
+                    <div class="inv-row"><span>Bat Volts</span> <strong>{inv.get('vBat',0):.1f}V</strong></div>
+                    <div class="inv-row"><span>Temp</span> <strong>{inv.get('temperature',0):.1f}°C</strong></div>
+                    <div style="margin-top:5px; font-size:0.8em; color:#666">{inv.get('Status')}</div>
                 </div>
-            """
-    else:
-        html += """<p style="text-align: center; color: #666; padding: 20px;">✓ No alerts sent in the last 12 hours</p>"""
-
+        """
     html += """
             </div>
         </div>
 
-        <!-- 6. Power Monitoring Chart -->
         <div class="card">
-            <div class="chart-container">
-                <h2>Power Monitoring - Last 12 Hours</h2>
-                <canvas id="powerChart"></canvas>
+            <h2 style="margin-top:0">Recent Alerts</h2>
+            <div>
+"""
+    if alert_history:
+        for a in reversed(alert_history):
+            clr = "#dc3545" if "critical" in a['type'] else "#ffc107"
+            html += f'<div class="alert-row" style="border-left:3px solid {clr}"><span style="color:#666">{a["timestamp"].strftime("%H:%M")}</span><strong>{a["subject"]}</strong></div>'
+    else:
+        html += '<div style="text-align:center; padding:15px; color:#999;">No recent alerts</div>'
+    
+    html += f"""
             </div>
-            <script>
-                const pCtx = document.getElementById('powerChart').getContext('2d');
-                new Chart(pCtx, {
-                    type: 'line',
-                    data: {
-                        labels: """ + json.dumps(times) + """,
-                        datasets: [
-                            {
-                                label: 'Total Load (W)',
-                                data: """ + json.dumps(load_values) + """,
-                                borderColor: 'rgb(102, 126, 234)',
-                                backgroundColor: 'rgba(102, 126, 234, 0.1)',
-                                borderWidth: 3,
-                                tension: 0.4,
-                                fill: true
-                            },
-                            {
-                                label: 'Battery Discharge (W)',
-                                data: """ + json.dumps(battery_values) + """,
-                                borderColor: 'rgb(235, 51, 73)',
-                                backgroundColor: 'rgba(235, 51, 73, 0.1)',
-                                borderWidth: 3,
-                                tension: 0.4,
-                                fill: true
-                            }
-                        ]
-                    },
-                    options: {
-                        responsive: true,
-                        interaction: { mode: 'index', intersect: false },
-                        scales: { y: { title: { display: true, text: 'Power (W)' } } }
-                    }
-                });
-            </script>
-        </div>
-
-        <div style="text-align:center; margin-top:30px; font-size:0.8em; color:#999;">
-            Data updates every """ + str(POLL_INTERVAL_MINUTES) + """ minutes.
         </div>
     </div>
-    <meta http-equiv="refresh" content="300">
+
+    <script>
+        const pCtx = document.getElementById('predChart').getContext('2d');
+        new Chart(pCtx, {{
+            type: 'line',
+            data: {{
+                labels: {json.dumps(sim_t)},
+                datasets: [{{
+                    label: 'Total Fuel %',
+                    data: {json.dumps(trace_pct)},
+                    borderColor: 'gray',
+                    segment: {{ borderColor: ctx => ctx.p0.parsed.y < 48 ? '#fd7e14' : '#28a745' }},
+                    borderWidth: 3, tension: 0.3, fill: true, backgroundColor: 'rgba(200,200,200,0.1)'
+                }}]
+            }},
+            options: {{
+                responsive: true, maintainAspectRatio: false,
+                scales: {{ y: {{ min: 0, max: 100, title: {{ display: true, text: '%' }} }} }},
+                plugins: {{
+                    annotation: {{
+                        annotations: {{
+                            sw: {{ type:'line', yMin:48, yMax:48, borderColor:'#fd7e14', borderWidth:2, borderDash:[5,5], label:{{content:'Backup Start', display:true, position:'start', backgroundColor:'rgba(253,126,20,0.8)'}} }},
+                            gn: {{ type:'line', yMin:0, yMax:0, borderColor:'#dc3545', borderWidth:2, label:{{content:'Generator', display:true, backgroundColor:'#dc3545'}} }}
+                        }}
+                    }}
+                }}
+            }}
+        }});
+
+        const hCtx = document.getElementById('histChart').getContext('2d');
+        new Chart(hCtx, {{
+            type: 'line',
+            data: {{
+                labels: {json.dumps(times)},
+                datasets: [
+                    {{ label: 'Load', data: {json.dumps(l_vals)}, borderColor: '#007bff', backgroundColor: 'rgba(0,123,255,0.1)', fill: true, tension: 0.3 }},
+                    {{ label: 'Discharge', data: {json.dumps(b_vals)}, borderColor: '#dc3545', backgroundColor: 'rgba(220,53,69,0.1)', fill: true, tension: 0.3 }}
+                ]
+            }},
+            options: {{ responsive: true, maintainAspectRatio: false }}
+        }});
+    </script>
 </body>
 </html>
 """
     return render_template_string(html)
 
-# ----------------------------
-# Start background polling thread
-# ----------------------------
-Thread(target=poll_growatt, daemon=True).start()
-
-# ----------------------------
-# Run Flask
-# ----------------------------
 if __name__ == "__main__":
+    Thread(target=poll_growatt, daemon=True).start()
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
