@@ -274,24 +274,35 @@ def generate_load_forecast(pattern, current_avg=0):
     for i in range(FORECAST_HOURS):
         ft = now + timedelta(hours=i)
         h = ft.hour
-        base = 1000
+        
+        # First set base using time-based defaults
+        if 0 <= h < 5: base = 600
+        elif 5 <= h < 8: base = 1800
+        elif 8 <= h < 17: base = 1200
+        elif 17 <= h < 22: base = 2800
+        else: base = 600  # For 22-23 (10pm-11pm) and any other hour
+        
+        # Then override with pattern if available
         if pattern:
             match = next((l for ph, _, l in pattern if ph == h), None)
             if match is not None: base = match
-        else:
-            if 0 <= h < 5: base = 600
-            elif 5 <= h < 8: base = 1800
-            elif 8 <= h < 17: base = 1200
-            elif 17 <= h < 22: base = 2800
         
+        # Adjust based on current average
         is_spike = current_avg > (base * 1.5)
         if current_avg > 0:
-            if i == 0: val = (current_avg * 0.8) + (base * 0.2)
-            elif i == 1: val = (current_avg * 0.3) + (base * 0.7) if is_spike else (current_avg * 0.5) + (base * 0.5)
-            elif i == 2: val = base if is_spike else (current_avg * 0.2) + (base * 0.8)
-            else: val = base
-        else: val = base
+            if i == 0: 
+                val = (current_avg * 0.8) + (base * 0.2)
+            elif i == 1: 
+                val = (current_avg * 0.3) + (base * 0.7) if is_spike else (current_avg * 0.5) + (base * 0.5)
+            elif i == 2: 
+                val = base if is_spike else (current_avg * 0.2) + (base * 0.8)
+            else: 
+                val = base
+        else: 
+            val = base
+            
         forecast.append({'time': ft, 'hour': h, 'estimated_load': val})
+    
     return forecast
 
 def calculate_battery_cascade(solar, load, p_pct, b_active=False):
@@ -1328,8 +1339,8 @@ def home():
             <div style="display: flex; align-items: center; gap: 1rem; margin-bottom: 1rem;">
                 <div style="font-size: 3rem;">{{ recommendation_icon }}</div>
                 <div style="flex: 1;">
-                    <h2 style="margin: 0; color: {{ recommendation_color }};">{{ recommendation_title }}</h2>
-                    <p style="margin: 0.5rem 0 0 0; color: var(--text-secondary); font-size: 1.1rem;">{{ recommendation_subtitle }}</p>
+                    <h2 style="margin: 0; color: {{ recommendation_color }};">{{ prominent_title }}</h2>
+                    <p style="margin: 0.5rem 0 0 0; color: var(--text-secondary); font-size: 1.1rem;">{{ prominent_subtitle }}</p>
                 </div>
             </div>
             
@@ -1344,7 +1355,7 @@ def home():
                 <div>
                     <h3 style="font-size: 1rem; margin-bottom: 0.75rem; color: var(--text-secondary);">💡 Usage Guidelines</h3>
                     <div style="background: var(--bg-secondary); padding: 1rem; border-radius: 8px;">
-                        {{ usage_guidelines|safe }}
+                        {{ prominent_details|safe }}
                     </div>
                 </div>
             </div>
@@ -1405,66 +1416,66 @@ def home():
                     </defs>
                     
                     <!-- Solar to Inverter line -->
-                    <line x1="100" y1="200" x2="250" y2="200" 
+                    <line x1="50" y1="200" x2="290" y2="200" 
                           stroke="{{ '#00ff88' if solar_active else 'rgba(255,255,255,0.1)' }}" 
                           stroke-width="3" class="connection-line"/>
                     {% if solar_active %}
                     <circle r="6" fill="#00ff88" class="flow-dot">
-                        <animateMotion dur="2s" repeatCount="indefinite" path="M100,200 L250,200" />
+                        <animateMotion dur="2s" repeatCount="indefinite" path="M50,200 L290,200" />
                     </circle>
                     <circle r="6" fill="#00ff88" class="flow-dot">
-                        <animateMotion dur="2s" repeatCount="indefinite" begin="0.5s" path="M100,200 L250,200" />
+                        <animateMotion dur="2s" repeatCount="indefinite" begin="0.5s" path="M50,200 L290,200" />
                     </circle>
                     {% endif %}
                     
                     <!-- Inverter to Load line -->
-                    <line x1="350" y1="200" x2="500" y2="200" 
+                    <line x1="310" y1="200" x2="550" y2="200" 
                           stroke="{{ '#00ccff' if load_value > 0 else 'rgba(255,255,255,0.1)' }}" 
                           stroke-width="3" class="connection-line"/>
                     {% if load_value > 0 %}
                     <circle r="6" fill="#00ccff" class="flow-dot">
-                        <animateMotion dur="1.5s" repeatCount="indefinite" path="M350,200 L500,200" />
+                        <animateMotion dur="1.5s" repeatCount="indefinite" path="M310,200 L550,200" />
                     </circle>
                     <circle r="6" fill="#00ccff" class="flow-dot">
-                        <animateMotion dur="1.5s" repeatCount="indefinite" begin="0.4s" path="M350,200 L500,200" />
+                        <animateMotion dur="1.5s" repeatCount="indefinite" begin="0.4s" path="M310,200 L550,200" />
                     </circle>
                     {% endif %}
                     
                     <!-- Battery to Inverter line (bidirectional) -->
-                    <line x1="300" y1="250" x2="300" y2="320" 
+                    <line x1="300" y1="210" x2="300" y2="350" 
                           stroke="{{ '#00ff88' if battery_charging else ('#ff3366' if battery_discharging else 'rgba(255,255,255,0.1)') }}" 
                           stroke-width="3" class="connection-line"/>
                     {% if battery_charging %}
                     <!-- Charging: flow DOWN from inverter to battery -->
                     <circle r="6" fill="#00ff88" class="flow-dot">
-                        <animateMotion dur="2s" repeatCount="indefinite" path="M300,250 L300,320" />
+                        <animateMotion dur="2s" repeatCount="indefinite" path="M300,210 L300,350" />
                     </circle>
                     {% elif battery_discharging %}
                     <!-- Discharging: flow UP from battery to inverter -->
                     <circle r="6" fill="#ff3366" class="flow-dot">
-                        <animateMotion dur="2s" repeatCount="indefinite" path="M300,320 L300,250" />
+                        <animateMotion dur="2s" repeatCount="indefinite" path="M300,350 L300,210" />
                     </circle>
                     <circle r="6" fill="#ff3366" class="flow-dot">
-                        <animateMotion dur="2s" repeatCount="indefinite" begin="0.6s" path="M300,320 L300,250" />
+                        <animateMotion dur="2s" repeatCount="indefinite" begin="0.6s" path="M300,350 L300,210" />
                     </circle>
                     {% endif %}
                     
                     <!-- Generator to Inverter line -->
-                    <line x1="300" y1="80" x2="300" y2="150" 
+                    <line x1="300" y1="50" x2="300" y2="190" 
                           stroke="{{ '#ff3366' if generator_on else 'rgba(255,255,255,0.1)' }}" 
                           stroke-width="3" class="connection-line"/>
                     {% if generator_on %}
                     <circle r="6" fill="#ff3366" class="flow-dot">
-                        <animateMotion dur="1.5s" repeatCount="indefinite" path="M300,80 L300,150" />
+                        <animateMotion dur="1.5s" repeatCount="indefinite" path="M300,50 L300,190" />
                     </circle>
                     <circle r="6" fill="#ff3366" class="flow-dot">
-                        <animateMotion dur="1.5s" repeatCount="indefinite" begin="0.3s" path="M300,80 L300,150" />
+                        <animateMotion dur="1.5s" repeatCount="indefinite" begin="0.3s" path="M300,50 L300,190" />
                     </circle>
                     {% endif %}
                 </svg>
                 
                 <!-- Nodes (on top of lines) -->
-                <div class="flow-node solar {{ 'active' if solar_active else '' }}" style="left: 50px; top: 50%; transform: translateY(-50%);">
+                <div class="flow-node solar {{ 'active' if solar_active else '' }}" style="left: 8%; top: 50%; transform: translateY(-50%);">
                     <div class="flow-icon">☀️</div>
                     <div class="flow-label">Solar</div>
                     <div class="flow-value">{{ solar_display }}W</div>
@@ -1476,19 +1487,19 @@ def home():
                     <div class="flow-value">{{ inverter_temp }}°C</div>
                 </div>
                 
-                <div class="flow-node load active" style="right: 50px; top: 50%; transform: translateY(-50%);">
+                <div class="flow-node load active" style="right: 8%; top: 50%; transform: translateY(-50%);">
                     <div class="flow-icon">🏠</div>
                     <div class="flow-label">Load</div>
                     <div class="flow-value">{{ load_display }}W</div>
                 </div>
                 
-                <div class="flow-node battery {{ 'active' if battery_charging or battery_discharging else '' }}" style="left: 50%; bottom: 30px; transform: translateX(-50%);">
+                <div class="flow-node battery {{ 'active' if battery_charging or battery_discharging else '' }}" style="left: 50%; bottom: 8%; transform: translateX(-50%);">
                     <div class="flow-icon">🔋</div>
                     <div class="flow-label">Battery</div>
                     <div class="flow-value">{{ primary_display }}%</div>
                 </div>
                 
-                <div class="flow-node generator {{ 'active' if generator_on else '' }}" style="left: 50%; top: 30px; transform: translateX(-50%);">
+                <div class="flow-node generator {{ 'active' if generator_on else '' }}" style="left: 50%; top: 8%; transform: translateX(-50%);">
                     <div class="flow-icon">{{ '⚠️' if generator_on else '🔌' }}</div>
                     <div class="flow-label">Generator</div>
                     <div class="flow-value">{{ 'ON' if generator_on else 'OFF' }}</div>
@@ -1853,11 +1864,11 @@ def home():
     primary_battery_class = "" if p_bat > 60 else "warning" if p_bat > 40 else "critical"
     backup_battery_class = "" if b_pct > 60 else "warning" if b_pct > 40 else "critical"
     
-    # Power flow states
-    solar_active = tot_sol > 100
-    battery_active = tot_dis > 100 or surplus_power > 100
-    battery_charging = surplus_power > 100
-    battery_discharging = tot_dis > 100
+    # Power flow states - FIXED: Ensure proper activation
+    solar_active = tot_sol > 50  # Lower threshold to show lines more often
+    battery_active = tot_dis > 50 or surplus_power > 50
+    battery_charging = surplus_power > 50
+    battery_discharging = tot_dis > 50
     
     # Get average inverter temperature
     inverter_temps = [inv.get('temperature', 0) for inv in latest_data.get('inverters', [])]
@@ -1867,12 +1878,18 @@ def home():
     alerts = [{"time": a['timestamp'].strftime("%H:%M"), "subject": a['subject'], "type": a['type']} 
               for a in reversed(alert_history[-10:])]
     
-    # Smart Recommendations
+    # Smart Recommendations - MAIN FIX: Separate content for different sections
     recommendation_icon = "⚡"
     recommendation_title = "Power Status"
     recommendation_subtitle = "Current system assessment"
     recommendation_class = "safe"
     recommendation_details = ""
+    
+    # Prominent card variables - DIFFERENT from recommendation card
+    prominent_icon = "📊"
+    prominent_title = "System Analysis"
+    prominent_subtitle = "Detailed power assessment"
+    prominent_details = ""
     
     safe_statuses = ["COOK NOW", "OVEN", "BATTERY FULL", "SOLAR POWERING", "HIGH SURPLUS"]
     is_safe_now = any(s in app_st for s in safe_statuses)
@@ -1889,6 +1906,16 @@ def home():
             • Minimize all non-essential loads<br>
             • System is on backup power - conserve energy
         """
+        prominent_icon = "🚨"
+        prominent_title = "EMERGENCY MODE"
+        prominent_subtitle = "Generator active - severe restrictions apply"
+        prominent_details = """
+            <strong>CRITICAL SITUATION:</strong><br>
+            • Generator is running - this is expensive and should be avoided<br>
+            • Battery voltage critically low: {{ backup_volt_display }}V<br>
+            • Primary battery: {{ primary_display }}%<br>
+            • Turn off ALL non-essential loads immediately
+        """
     elif b_active:
         recommendation_icon = "⚠️"
         recommendation_title = "Backup Battery Active"
@@ -1900,6 +1927,16 @@ def home():
             • Avoid oven, kettle, high-power appliances<br>
             • Wait for solar charging to resume<br>
             • System will switch to generator if backup depletes
+        """
+        prominent_icon = "⚠️"
+        prominent_title = "BACKUP MODE ACTIVE"
+        prominent_subtitle = "Primary battery depleted - backup engaged"
+        prominent_details = """
+            <strong>BACKUP SYSTEM ENGAGED:</strong><br>
+            • Primary battery: {{ primary_display }}% (depleted)<br>
+            • Backup battery: {{ backup_volt_display }}V ({{ backup_pct_display }}%)<br>
+            • Backup battery capacity: {{ backup_kwh }} kWh<br>
+            • Avoid all heavy loads to preserve backup power
         """
     elif p_bat > 95:
         recommendation_icon = "🔋"
@@ -1913,6 +1950,16 @@ def home():
             • Pool Pumps: Can run<br>
             • Battery at maximum capacity ({p_bat:.0f}%)
         """
+        prominent_icon = "🎯"
+        prominent_title = "OPTIMAL USAGE WINDOW"
+        prominent_subtitle = "Perfect time for energy-intensive tasks"
+        prominent_details = f"""
+            <strong>PERFECT CONDITIONS FOR HEAVY LOADS:</strong><br>
+            • Battery: {p_bat:.0f}% (fully charged)<br>
+            • Surplus power: {surplus_power:.0f}W available<br>
+            • Recommended: Cooking, laundry, pool pumps<br>
+            • Time to use stored solar energy
+        """
     elif (p_bat > 75 and surplus_power > 3000):
         recommendation_icon = "⚡"
         recommendation_title = "High Surplus - Perfect Time!"
@@ -1924,6 +1971,17 @@ def home():
             • Kettle (1500-2000W): ✅ Safe<br>
             • Washing Machine (500-1000W): ✅ Safe<br>
             • Battery: {p_bat:.0f}% | Surplus: {surplus_power:.0f}W
+        """
+        prominent_icon = "⚡"
+        prominent_title = "HIGH SURPLUS DETECTED"
+        prominent_subtitle = f"Excess {surplus_power:.0f}W available for use"
+        prominent_details = f"""
+            <strong>SURPLUS ENERGY AVAILABLE:</strong><br>
+            • Current surplus: {surplus_power:.0f}W<br>
+            • Battery level: {p_bat:.0f}% ({p_kwh:.1f} kWh)<br>
+            • Solar generation: {tot_sol:.0f}W<br>
+            • Load demand: {tot_load:.0f}W<br>
+            • Perfect for cooking, laundry, charging
         """
     elif tot_sol > 2000 and (tot_sol > tot_load * 0.9):
         recommendation_icon = "☀️"
@@ -1937,6 +1995,17 @@ def home():
             • Oven: ⚠️ Monitor battery (currently {p_bat:.0f}%)<br>
             • Solar generation: {tot_sol:.0f}W
         """
+        prominent_icon = "☀️"
+        prominent_title = "SOLAR-DRIVEN OPERATION"
+        prominent_subtitle = "Most power coming directly from solar"
+        prominent_details = f"""
+            <strong>SOLAR COVERING LOADS:</strong><br>
+            • Solar generation: {tot_sol:.0f}W<br>
+            • Load demand: {tot_load:.0f}W<br>
+            • Battery: {p_bat:.0f}% ({p_kwh:.1f} kWh)<br>
+            • Coverage: {(tot_sol/tot_load*100 if tot_load > 0 else 100):.0f}% from solar<br>
+            • Light to moderate loads recommended
+        """
     elif weather_bad and p_bat > 80:
         recommendation_icon = "⚡"
         recommendation_title = "Cook Now - Bad Weather Ahead"
@@ -1948,6 +2017,16 @@ def home():
             • Battery: {p_bat:.0f}% (excellent level)<br>
             • Low solar expected in coming hours<br>
             • Better to use stored energy than waste it
+        """
+        prominent_icon = "🌧️"
+        prominent_title = "POOR WEATHER WARNING"
+        prominent_subtitle = "Low solar forecast - use stored energy now"
+        prominent_details = f"""
+            <strong>USE ENERGY BEFORE BAD WEATHER:</strong><br>
+            • Current battery: {p_bat:.0f}% ({p_kwh:.1f} kWh)<br>
+            • Poor solar conditions forecast<br>
+            • Recommended: Cooking, laundry now<br>
+            • Avoid wasting stored solar energy
         """
     elif weather_bad and p_bat < 70:
         recommendation_icon = "☁️"
@@ -1961,6 +2040,16 @@ def home():
             • Battery: {p_bat:.0f}% (moderate)<br>
             • Poor solar conditions forecast
         """
+        prominent_icon = "🌩️"
+        prominent_title = "CONSERVATION ADVISED"
+        prominent_subtitle = "Limited solar expected - conserve battery"
+        prominent_details = f"""
+            <strong>CONSERVE ENERGY:</strong><br>
+            • Battery: {p_bat:.0f}% (moderate)<br>
+            • Poor solar forecast ahead<br>
+            • Avoid heavy loads if possible<br>
+            • Postpone non-essential power use
+        """
     elif p_bat < 45 and tot_sol < tot_load:
         recommendation_icon = "⚠️"
         recommendation_title = "Reduce Loads"
@@ -1972,6 +2061,17 @@ def home():
             • System is discharging ({tot_dis:.0f}W)<br>
             • Avoid oven, kettle, heavy appliances<br>
             • Wait for better solar generation
+        """
+        prominent_icon = "🔋"
+        prominent_title = "LOW BATTERY WARNING"
+        prominent_subtitle = "Battery discharging - reduce consumption"
+        prominent_details = f"""
+            <strong>LOW BATTERY SITUATION:</strong><br>
+            • Battery: {p_bat:.0f}% ({p_kwh:.1f} kWh)<br>
+            • Discharge rate: {tot_dis:.0f}W<br>
+            • Solar: {tot_sol:.0f}W | Load: {tot_load:.0f}W<br>
+            • Deficit: {tot_load-tot_sol:.0f}W from battery<br>
+            • Minimize all non-essential loads
         """
     elif surplus_power > 100:
         recommendation_icon = "🔋"
@@ -1985,6 +2085,16 @@ def home():
             • Oven: Wait for higher surplus<br>
             • Battery: {p_bat:.0f}%
         """
+        prominent_icon = "⬆️"
+        prominent_title = "BATTERY CHARGING"
+        prominent_subtitle = f"System recovering at {surplus_power:.0f}W"
+        prominent_details = f"""
+            <strong>CHARGING IN PROGRESS:</strong><br>
+            • Charging rate: {surplus_power:.0f}W<br>
+            • Battery: {p_bat:.0f}% → {min(100, p_bat + (surplus_power/300)*1):.0f}% in 1 hour<br>
+            • Light loads safe, avoid heavy loads<br>
+            • Let battery recover for future use
+        """
     else:
         recommendation_icon = "ℹ️"
         recommendation_title = "Normal Operation"
@@ -1996,6 +2106,18 @@ def home():
             • Heavy loads: Check battery level first<br>
             • Battery: {p_bat:.0f}%<br>
             • Solar: {tot_sol:.0f}W | Load: {tot_load:.0f}W
+        """
+        prominent_icon = "📈"
+        prominent_title = "SYSTEM STATUS"
+        prominent_subtitle = "All parameters within normal range"
+        prominent_details = f"""
+            <strong>SYSTEM OVERVIEW:</strong><br>
+            • Load: {tot_load:.0f}W<br>
+            • Solar: {tot_sol:.0f}W<br>
+            • Battery: {p_bat:.0f}% ({p_kwh:.1f} kWh)<br>
+            • Backup: {b_volt:.1f}V ({b_pct:.0f}%)<br>
+            • Net: {surplus_power:.0f}W {'surplus' if surplus_power > 0 else 'deficit'}<br>
+            • Normal operation - monitor before heavy loads
         """
     
     # Smart Schedule
@@ -2055,10 +2177,11 @@ def home():
     
     # Build HTML string
     schedule_content = ""
+    schedule_html = ""
     if schedule_items:
         for item in schedule_items:
             color = "var(--accent-primary)" if item['type'] == 'safe' else ("var(--accent-warning)" if item['type'] == 'caution' else "var(--accent-critical)")
-            schedule_content += f"""
+            item_html = f"""
                 <div class="schedule-item">
                     <div class="schedule-item-icon">{item['icon']}</div>
                     <div class="schedule-item-content">
@@ -2067,17 +2190,24 @@ def home():
                     </div>
                 </div>
             """
+            schedule_content += item_html
+            schedule_html += item_html
     else:
         schedule_content = '<div style="text-align: center; padding: 2rem; color: var(--text-secondary);">Initializing forecast data...</div>'
+        schedule_html = schedule_content
 
-    # Define variables for the empty cards
-    schedule_html = schedule_content
-    usage_guidelines = recommendation_details
+    # Recommendation styling
+    recommendation_color = "var(--accent-primary)" if recommendation_class == "safe" else ("var(--accent-warning)" if recommendation_class == "caution" else "var(--accent-critical)")
+    recommendation_border_color = recommendation_color
+    recommendation_bg = "rgba(0, 255, 136, 0.05)" if recommendation_class == "safe" else ("rgba(255, 170, 0, 0.05)" if recommendation_class == "caution" else "rgba(255, 51, 102, 0.05)")
+    
+    # Format prominent_details with current values
+    prominent_details = prominent_details.replace("{{ primary_display }}", f"{p_bat:.0f}")
+    prominent_details = prominent_details.replace("{{ backup_volt_display }}", f"{b_volt:.1f}")
+    prominent_details = prominent_details.replace("{{ backup_pct_display }}", f"{b_pct:.0f}")
     
     return render_template_string(
         html_template,
-        schedule_html=schedule_html,  
-        usage_guidelines=usage_guidelines, 
         timestamp=latest_data.get('timestamp', 'Initializing...'),
         status_title=app_st,
         status_subtitle=app_sub,
@@ -2087,7 +2217,15 @@ def home():
         recommendation_subtitle=recommendation_subtitle,
         recommendation_class=recommendation_class,
         recommendation_details=recommendation_details,
+        recommendation_color=recommendation_color,
+        recommendation_border_color=recommendation_border_color,
+        recommendation_bg=recommendation_bg,
+        prominent_icon=prominent_icon,
+        prominent_title=prominent_title,
+        prominent_subtitle=prominent_subtitle,
+        prominent_details=prominent_details,
         schedule_content=schedule_content,
+        schedule_html=schedule_html,
         # Numeric values for logic
         load_value=tot_load,
         solar_value=tot_sol,
