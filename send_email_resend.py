@@ -2023,32 +2023,33 @@ def home():
                         best_end = d['time']
                     current_run = 0
         
-        if best_start and best_end:
-            schedule_items.append({
-                'icon': '🚿',
-                'title': 'Best Time for Washing/Heavy Loads',
-                'time': f"{best_start.strftime('%I:%M %p').lstrip('0')} - {best_end.strftime('%I:%M %p').lstrip('0')}",
-                'type': 'safe'
-            })
-        else:
-            schedule_items.append({
-                'icon': '⚠️',
-                'title': 'No High Solar Window Today',
-                'time': 'Avoid heavy loads',
-                'type': 'danger'
-            })
+      if best_start and best_end:
+        schedule_items.append({
+            'icon': '🚿',
+            'title': 'Best Time for Washing/Heavy Loads',
+            'time': f"{best_start.strftime('%I:%M %p').lstrip('0')} - {best_end.strftime('%I:%M %p').lstrip('0')}",
+            'type': 'safe'
+        })
+    elif not is_safe_now: # Fix: Only warn if not currently safe
+        schedule_items.append({
+            'icon': '⚠️',
+            'title': 'No High Solar Window Today',
+            'time': 'Avoid heavy loads',
+            'type': 'danger'
+        })
         
-        # Check for cloud warnings
-        next_3_gen = sum([d['estimated_generation'] for d in forecast_data[:3]]) / 3
-        current_hour = datetime.now(EAT).hour
-        if next_3_gen < 500 and 8 <= current_hour <= 16:
-            schedule_items.append({
-                'icon': '☁️',
-                'title': 'Cloud Warning',
-                'time': 'Low solar expected next 3 hours',
-                'type': 'caution'
-            })
+    # Check for cloud warnings (keep existing logic)
+    next_3_gen = sum([d['estimated_generation'] for d in forecast_data[:3]]) / 3 if forecast_data else 0
+    current_hour = datetime.now(EAT).hour
+    if next_3_gen < 500 and 8 <= current_hour <= 16:
+        schedule_items.append({
+            'icon': '☁️',
+            'title': 'Cloud Warning',
+            'time': 'Low solar expected next 3 hours',
+            'type': 'caution'
+        })
     
+    # Build HTML string
     schedule_content = ""
     if schedule_items:
         for item in schedule_items:
@@ -2064,10 +2065,35 @@ def home():
             """
     else:
         schedule_content = '<div style="text-align: center; padding: 2rem; color: var(--text-secondary);">Initializing forecast data...</div>'
-    
-    from flask import render_template_string
+
+    # --- VARIABLE FIX: Define variables for the empty cards ---
+    schedule_html = schedule_content
+    usage_guidelines = recommendation_details
+
     return render_template_string(
         html_template,
+        timestamp=latest_data.get('timestamp', 'Initializing...'),
+        status_title=app_st,
+        status_subtitle=app_sub,
+        status_class=app_col,
+        recommendation_icon=recommendation_icon,
+        recommendation_title=recommendation_title,
+        recommendation_subtitle=recommendation_subtitle,
+        recommendation_class=recommendation_class,
+        recommendation_details=recommendation_details,
+        
+        # FIX: Pass the newly defined variables
+        schedule_content=schedule_content,
+        schedule_html=schedule_html,         
+        usage_guidelines=usage_guidelines,
+    
+    from flask import render_template_string
+    usage_guidelines = recommendation_details
+    schedule_html = schedule_content
+    return render_template_string(
+        html_template,
+        schedule_html=schedule_html,  
+        usage_guidelines=usage_guidelines, 
         timestamp=latest_data.get('timestamp', 'Initializing...'),
         status_title=app_st,
         status_subtitle=app_sub,
