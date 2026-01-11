@@ -556,7 +556,7 @@ def generate_solar_forecast(weather_forecast_data, historical_pattern):
     return forecast
 
 # ----------------------------
-# UPDATED: Smart Load Forecasting
+# UPDATED: Smart Load Forecasting with Spike Decay
 # ----------------------------
 
 def get_default_load_for_hour(hour):
@@ -584,7 +584,7 @@ def calculate_moving_average_load(history_minutes=45):
     return sum(recent_loads) / len(recent_loads)
 
 def generate_load_forecast(historical_pattern, moving_avg_load=0):
-    """Generate load demand forecast based on historical patterns AND current trend"""
+    """Generate load demand forecast with SMART SPIKE DETECTION"""
     forecast = []
     now = datetime.now(EAT)
     
@@ -603,22 +603,35 @@ def generate_load_forecast(historical_pattern, moving_avg_load=0):
                     found_in_history = True
                     break
         
-        # Fallback if no history for this specific hour (using smart time-of-day profile)
+        # Fallback if no history
         if not found_in_history:
             base_load = get_default_load_for_hour(hour_of_day)
             
-        # 2. Blend Moving Average with Base Profile
-        # This creates a smooth transition from current chart status to future prediction
+        # 2. Spike Detection & Smart Blending
+        # If current trend > 1.5x historical average, treat it as a temporary spike
+        # and decay back to baseline faster.
+        is_spike = False
+        if moving_avg_load > 0 and base_load > 0:
+            if moving_avg_load > (base_load * 1.5):
+                is_spike = True
+        
         if moving_avg_load > 0:
             if hour_offset == 0:
-                # Immediate future: 80% current trend, 20% profile
+                # Immediate future: Heavily weighted to current trend
                 final_load = (moving_avg_load * 0.8) + (base_load * 0.2)
             elif hour_offset == 1:
-                # Near future: 50% current trend, 50% profile
-                final_load = (moving_avg_load * 0.5) + (base_load * 0.5)
+                # Near future: If Spike, drop drastically. If not, gradual blend.
+                if is_spike:
+                    # Assume spike finishes within an hour, drop to mostly historical
+                    final_load = (moving_avg_load * 0.3) + (base_load * 0.7)
+                else:
+                    final_load = (moving_avg_load * 0.5) + (base_load * 0.5)
             elif hour_offset == 2:
-                 # Mid future: 20% trend, 80% profile
-                final_load = (moving_avg_load * 0.2) + (base_load * 0.8)
+                 # Mid future
+                if is_spike:
+                    final_load = base_load # Spike is gone
+                else:
+                    final_load = (moving_avg_load * 0.2) + (base_load * 0.8)
             else:
                 # Distant future: 100% profile
                 final_load = base_load
@@ -634,13 +647,12 @@ def generate_load_forecast(historical_pattern, moving_avg_load=0):
     return forecast
 
 # ----------------------------
-# UPDATED: Cascade Battery Simulation with New Limits (kWh traces for Bar Chart)
+# UPDATED: Cascade Battery Simulation with Time-to-Empty Calculation
 # ----------------------------
 def calculate_battery_cascade(solar_forecast_data, load_forecast_data, current_primary_percent, backup_active=False):
     """
     Simulates: Primary Battery -> Backup Battery -> Generator Needed
-    Respects hard cutoffs and usable ranges.
-    Returns kWh traces for visualization.
+    Returns kWh traces and Time-To-Empty string.
     """
     if not solar_forecast_data or not load_forecast_data:
         return None
@@ -649,8 +661,8 @@ def calculate_battery_cascade(solar_forecast_data, load_forecast_data, current_p
     # Primary: % of 30000 Wh
     current_primary_wh = (current_primary_percent / 100) * PRIMARY_BATTERY_CAPACITY_WH
     
-    # Backup: Default to 80% full of its degraded capacity if not active, or track if we had sensors
-    current_backup_wh = BACKUP_BATTERY_DEGRADED_WH * 0.9 # Assume 90% charge start
+    # Backup: Default to 90% full of its degraded capacity if not active
+    current_backup_wh = BACKUP_BATTERY_DEGRADED_WH * 0.9 
     
     # Cutoff Wh thresholds
     primary_cutoff_wh = PRIMARY_BATTERY_CAPACITY_WH * (PRIMARY_CUTOFF_PCT / 100.0) # 6000Wh
@@ -663,12 +675,14 @@ def calculate_battery_cascade(solar_forecast_data, load_forecast_data, current_p
     trace_deficit_watts = [0]
     
     accumulated_genset_wh = 0
+    time_cutoff_reached = None # Store time string when primary hits 20%
     
     limit = min(len(solar_forecast_data), len(load_forecast_data))
     
     for i in range(limit):
         solar = solar_forecast_data[i]['estimated_generation']
         load = load_forecast_data[i]['estimated_load']
+        forecast_time_str = solar_forecast_data[i]['time'].strftime("%I:%M %p") # 10:00 PM
         
         # Net Power Deficit (Instantaneous Watts)
         net_watts = load - solar
@@ -678,7 +692,7 @@ def calculate_battery_cascade(solar_forecast_data, load_forecast_data, current_p
         energy_step_wh = net_watts * 1.0 
         
         if energy_step_wh > 0:
-            # We have a deficit, need to pull from storage
+            # We have a deficit
             
             # 1. Pull from Primary (Down to Cutoff)
             available_primary = current_primary_wh - primary_cutoff_wh
@@ -690,8 +704,15 @@ def calculate_battery_cascade(solar_forecast_data, load_forecast_data, current_p
                 else:
                     energy_step_wh -= available_primary
                     current_primary_wh = primary_cutoff_wh
+                    # Record time if this is first time hitting cutoff
+                    if time_cutoff_reached is None:
+                        time_cutoff_reached = forecast_time_str
+            else:
+                # Already at/below cutoff
+                if time_cutoff_reached is None:
+                    time_cutoff_reached = "NOW"
                 
-            # 2. Pull from Backup (if Primary empty/cutoff)
+            # 2. Pull from Backup
             if energy_step_wh > 0:
                 available_backup = current_backup_wh - backup_cutoff_wh
                 if available_backup > 0:
@@ -702,7 +723,7 @@ def calculate_battery_cascade(solar_forecast_data, load_forecast_data, current_p
                         energy_step_wh -= available_backup
                         current_backup_wh = backup_cutoff_wh
             
-            # 3. Generator Needed (if both empty)
+            # 3. Generator Needed
             if energy_step_wh > 0:
                 accumulated_genset_wh += energy_step_wh
                 
@@ -719,7 +740,7 @@ def calculate_battery_cascade(solar_forecast_data, load_forecast_data, current_p
                 current_primary_wh = PRIMARY_BATTERY_CAPACITY_WH
                 surplus_wh -= space_in_primary
                 
-            # Charge Backup second (if primary full)
+            # Charge Backup second
             space_in_backup = BACKUP_BATTERY_DEGRADED_WH - current_backup_wh
             if surplus_wh <= space_in_backup:
                 current_backup_wh += surplus_wh
@@ -737,7 +758,8 @@ def calculate_battery_cascade(solar_forecast_data, load_forecast_data, current_p
         'genset_trace': trace_genset_needed_kwh,
         'deficit_trace': trace_deficit_watts,
         'will_need_generator': accumulated_genset_wh > 0,
-        'primary_cutoff_kwh': primary_cutoff_wh / 1000
+        'primary_cutoff_kwh': primary_cutoff_wh / 1000,
+        'time_cutoff_reached': time_cutoff_reached
     }
 
 def update_solar_pattern(current_generation):
@@ -1397,6 +1419,7 @@ def home():
     trace_genset = []
     trace_deficit = []
     primary_cutoff_kwh = 6
+    time_cutoff_reached = None
     
     if battery_life_prediction:
         sim_times = ["Now"] + forecast_times
@@ -1405,17 +1428,15 @@ def home():
         trace_genset = battery_life_prediction.get('genset_trace', [])
         trace_deficit = battery_life_prediction.get('deficit_trace', [])
         primary_cutoff_kwh = battery_life_prediction.get('primary_cutoff_kwh', 6)
+        time_cutoff_reached = battery_life_prediction.get('time_cutoff_reached', None)
         
         # Determine battery prediction message
         if battery_life_prediction.get('will_need_generator'):
              pred_class = "critical"
              pred_message = "🚨 CRITICAL: Generator will be needed!"
-        elif trace_primary and min(trace_primary) <= primary_cutoff_kwh:
+        elif time_cutoff_reached:
              pred_class = "warning"
-             pred_message = "⚠️ WARNING: Primary battery will hit CUTOFF (20%)."
-        elif trace_primary and min(trace_primary) <= 12: # 40% of 30k is 12k
-             pred_class = "warning"
-             pred_message = "⚠️ WARNING: Conserve Energy (Entering Reserve)."
+             pred_message = f"⚠️ WARNING: Primary battery runs out at {time_cutoff_reached}"
         else:
              pred_class = "good"
              pred_message = "✓ OK: Battery sufficient for forecast period."
@@ -1917,8 +1938,8 @@ def home():
     # Battery life prediction
     html += f"""
             <div class="battery-prediction {pred_class}">
-                <h3>🔋 Battery Life Prediction</h3>
-                <p><strong>{pred_message}</strong></p>
+                <h3>🔋 Battery Run Time Prediction</h3>
+                <p style="font-size: 1.4em; margin: 10px 0;"><strong>{pred_message}</strong></p>
                 <p><strong>Status:</strong> {primary_battery:.0f}% Primary | {backup_voltage:.1f}V Backup</p>
                 <p style="font-size: 0.85em; opacity: 0.8;">Based on {historical_pattern_count} solar patterns & {load_pattern_count} load patterns</p>
             </div>
@@ -2246,7 +2267,8 @@ def home():
                                             content: 'System Cutoff (20%)',
                                             display: true,
                                             position: 'end',
-                                            backgroundColor: 'rgba(255, 0, 0, 0.8)'
+                                            backgroundColor: 'rgba(255, 0, 0, 0.8)',
+                                            color: 'white'
                                         }}
                                     }}
                                 }}
