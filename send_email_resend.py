@@ -1919,6 +1919,9 @@ def home():
 """
     
     # NEW BATTERY GAUGES
+    # Gradient Logic:
+    # Primary: 0-20 (Black) | 20-40 (Red-Orange) | 40-100 (Green)
+    # Backup: 0-20 (Black) | 20-100 (Red-Green)
     html += f"""
             <h2>Battery Status</h2>
             <div class="battery-visual-container">
@@ -1981,11 +1984,6 @@ def home():
                             <strong>{backup_voltage_status}</strong>
                         </div>
                     </div>
-                </div>
-                
-                <!-- Manual Reserve Note -->
-                <div style="width:100%; text-align:center; padding:10px; background:#fff3cd; border:1px solid #ffeeba; border-radius:5px; color:#856404; margin-top:10px;">
-                    <strong>ℹ️ Manual Emergency Reserve (6kWh)</strong> available if automated backup fails.
                 </div>
             </div>
 
