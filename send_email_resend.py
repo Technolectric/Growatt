@@ -50,12 +50,17 @@ INVERTER_TEMP_CRITICAL = 70  # °C
 COMMUNICATION_TIMEOUT_MINUTES = 10
 
 # Battery Specifications (LiFePO4)
-# Primary: 30kWh Total. 80% Usable (24kWh). 
+# Primary: 30kWh Total. 
+# 0-20% (6kWh): Hard Cutoff
+# 20-40% (6kWh): Emergency Reserve
+# 40-100% (18kWh): Daily Usable
 PRIMARY_BATTERY_CAPACITY_WH = 30000  
-PRIMARY_BATTERY_USABLE_WH = 24000    # 80% of 30kWh is usable for daily cycling
-# Backup: 51V(0%) to 53V(100%). 21kWh Total.
+PRIMARY_BATTERY_USABLE_WH = 18000    # The top 60% is for daily cycling
+
+# Backup: 21kWh Total (Degraded). 
+# 80% Usable (cuts off at 20%)
 BACKUP_BATTERY_DEGRADED_WH = 21000   
-BACKUP_BATTERY_USABLE_WH = 14700     
+BACKUP_BATTERY_USABLE_WH = 16800     # 80% of 21kWh
 
 # Tiered Load Alert System (SOLAR-AWARE - only alerts on battery discharge)
 # TIER 1: Moderate battery discharge (1500-2000W) + Low Battery - 120 min cooldown
@@ -1273,6 +1278,7 @@ def poll_growatt():
             # Calculate Backup Percent based on Voltage (Linear 51V=0% to 53V=100%)
             # Formula: (Voltage - 51) / 2 * 100
             backup_percent_calc = max(0, min(100, (backup_battery_voltage - 51.0) / 2.0 * 100))
+            # Display kWh based on the usable capacity being 80% of total degraded
             backup_kwh_calc = (backup_percent_calc / 100) * (BACKUP_BATTERY_DEGRADED_WH / 1000)
             
             # Calculate battery life prediction (CASCADE LOGIC)
@@ -1584,6 +1590,8 @@ def home():
             border-radius: 18px;
             overflow: hidden;
             box-shadow: inset 0 2px 5px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+            margin-top: 15px;
         }}
         
         .batt-bar-fill {{
@@ -1614,6 +1622,7 @@ def home():
             font-size: 0.75em;
             color: #666;
             transform: translateX(-50%);
+            white-space: nowrap;
         }}
         
         .batt-details {{
@@ -1894,9 +1903,15 @@ def home():
                         <span style="color: {primary_color}">{primary_battery:.0f}%</span>
                     </div>
                     <div class="batt-bar-container">
+                        <!-- Marker at 20% (Cutoff) -->
                         <div class="batt-marker" style="left: 20%;">
+                            <span class="batt-marker-label">Cutoff</span>
+                        </div>
+                        <!-- Marker at 40% (Reserve) -->
+                        <div class="batt-marker" style="left: 40%;">
                             <span class="batt-marker-label">Reserve</span>
                         </div>
+                        
                         <div class="batt-bar-fill" style="width: {primary_battery}%; background: {primary_color};">
                             {primary_battery:.0f}%
                         </div>
@@ -1912,7 +1927,7 @@ def home():
                         </div>
                     </div>
                     <div style="margin-top: 5px; font-size: 0.8em; color: #888; text-align: center;">
-                        80% Usable + 20% Emergency Reserve
+                        40-100% Daily Usable | 20-40% Emergency | 0-20% Cutoff
                     </div>
                 </div>
 
@@ -1938,7 +1953,7 @@ def home():
                         </div>
                     </div>
                     <div style="margin-top: 5px; font-size: 0.8em; color: #888; text-align: center;">
-                        Calculated from Voltage (51V-53V) | ~21kWh Max
+                        21kWh Total | 80% Usable | Linear Scale 51V-53V
                     </div>
                 </div>
             </div>
