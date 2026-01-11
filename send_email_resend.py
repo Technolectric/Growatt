@@ -915,17 +915,87 @@ def home():
         .trend-up { color: var(--accent-primary); }
         .trend-down { color: var(--accent-critical); }
         
-        /* Power flow visualization */
+        /* Responsive Power Flow Visualization */
         .power-flow {
             position: relative;
             height: 400px;
+            width: 100%;
             display: flex;
             align-items: center;
             justify-content: center;
             margin: 2rem 0;
         }
         
+        @media (max-width: 768px) {
+            .power-flow {
+                height: 300px;
+            }
+            
+            .flow-node {
+                width: 70px !important;
+                height: 70px !important;
+            }
+            
+            .flow-node.inverter {
+                width: 85px !important;
+                height: 85px !important;
+            }
+            
+            .flow-icon {
+                font-size: 1.5rem !important;
+            }
+            
+            .flow-node.inverter .flow-icon {
+                font-size: 2rem !important;
+            }
+            
+            .flow-label {
+                font-size: 0.6rem !important;
+            }
+            
+            .flow-value {
+                font-size: 0.65rem !important;
+            }
+        }
+        
+        @media (max-width: 480px) {
+            .power-flow {
+                height: 250px;
+            }
+            
+            .flow-node {
+                width: 60px !important;
+                height: 60px !important;
+            }
+            
+            .flow-node.inverter {
+                width: 75px !important;
+                height: 75px !important;
+            }
+            
+            .flow-icon {
+                font-size: 1.2rem !important;
+            }
+            
+            .flow-node.inverter .flow-icon {
+                font-size: 1.5rem !important;
+            }
+            
+            .flow-label {
+                font-size: 0.5rem !important;
+            }
+            
+            .flow-value {
+                font-size: 0.55rem !important;
+            }
+        }
+        
         .flow-svg {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            top: 0;
+            left: 0;
             pointer-events: none;
         }
         
@@ -1205,6 +1275,21 @@ def home():
             .status-title { font-size: 1.8rem; }
             .metric-value { font-size: 2rem; }
             .container { padding: 1rem; }
+            .grid-4 {
+                grid-template-columns: repeat(2, 1fr);
+            }
+            .card {
+                padding: 1.5rem;
+            }
+        }
+        
+        @media (max-width: 480px) {
+            h1 { font-size: 2rem; }
+            .status-title { font-size: 1.5rem; }
+            .grid-4 {
+                grid-template-columns: 1fr;
+            }
+            .metric-value { font-size: 1.8rem; }
         }
         
         /* Loading state */
@@ -1405,12 +1490,12 @@ def home():
             </div>
         </div>
         
-        <!-- Power Flow Visualization -->
+        <!-- Responsive Power Flow Visualization -->
         <div class="card">
             <h2>Real-time Energy Flow</h2>
             <div class="power-flow">
-                <!-- Connecting Lines (behind nodes) -->
-                <svg class="flow-svg" viewBox="0 0 600 400" style="position: absolute; width: 100%; height: 100%; top: 0; left: 0;">
+                <!-- Connecting Lines (SVG) -->
+                <svg class="flow-svg" viewBox="0 0 100 100" preserveAspectRatio="xMidYMid meet">
                     <defs>
                         <!-- Gradient for active flows -->
                         <linearGradient id="flowGradient" x1="0%" y1="0%" x2="100%" y2="0%">
@@ -1427,66 +1512,66 @@ def home():
                     </defs>
                     
                     <!-- Solar to Inverter line -->
-                    <line x1="50" y1="200" x2="290" y2="200" 
+                    <line x1="10" y1="50" x2="45" y2="50" 
                           stroke="{{ '#00ff88' if solar_active else 'rgba(255,255,255,0.3)' }}" 
-                          stroke-width="3" class="connection-line"/>
+                          stroke-width="1" class="connection-line"/>
                     {% if solar_active %}
-                    <circle r="6" fill="#00ff88" class="flow-dot">
-                        <animateMotion dur="2s" repeatCount="indefinite" path="M50,200 L290,200" />
+                    <circle r="0.5" fill="#00ff88" class="flow-dot">
+                        <animateMotion dur="2s" repeatCount="indefinite" path="M10,50 L45,50" />
                     </circle>
-                    <circle r="6" fill="#00ff88" class="flow-dot">
-                        <animateMotion dur="2s" repeatCount="indefinite" begin="0.5s" path="M50,200 L290,200" />
+                    <circle r="0.5" fill="#00ff88" class="flow-dot">
+                        <animateMotion dur="2s" repeatCount="indefinite" begin="0.5s" path="M10,50 L45,50" />
                     </circle>
                     {% endif %}
                     
                     <!-- Inverter to Load line -->
-                    <line x1="310" y1="200" x2="550" y2="200" 
+                    <line x1="55" y1="50" x2="90" y2="50" 
                           stroke="{{ '#00ccff' if load_value > 0 else 'rgba(255,255,255,0.3)' }}" 
-                          stroke-width="3" class="connection-line"/>
+                          stroke-width="1" class="connection-line"/>
                     {% if load_value > 0 %}
-                    <circle r="6" fill="#00ccff" class="flow-dot">
-                        <animateMotion dur="1.5s" repeatCount="indefinite" path="M310,200 L550,200" />
+                    <circle r="0.5" fill="#00ccff" class="flow-dot">
+                        <animateMotion dur="1.5s" repeatCount="indefinite" path="M55,50 L90,50" />
                     </circle>
-                    <circle r="6" fill="#00ccff" class="flow-dot">
-                        <animateMotion dur="1.5s" repeatCount="indefinite" begin="0.4s" path="M310,200 L550,200" />
+                    <circle r="0.5" fill="#00ccff" class="flow-dot">
+                        <animateMotion dur="1.5s" repeatCount="indefinite" begin="0.4s" path="M55,50 L90,50" />
                     </circle>
                     {% endif %}
                     
                     <!-- Battery to Inverter line (bidirectional) -->
-                    <line x1="300" y1="210" x2="300" y2="350" 
+                    <line x1="50" y1="52" x2="50" y2="85" 
                           stroke="{{ '#00ff88' if battery_charging else ('#ff3366' if battery_discharging else 'rgba(255,255,255,0.3)') }}" 
-                          stroke-width="3" class="connection-line"/>
+                          stroke-width="1" class="connection-line"/>
                     {% if battery_charging %}
                     <!-- Charging: flow DOWN from inverter to battery -->
-                    <circle r="6" fill="#00ff88" class="flow-dot">
-                        <animateMotion dur="2s" repeatCount="indefinite" path="M300,210 L300,350" />
+                    <circle r="0.5" fill="#00ff88" class="flow-dot">
+                        <animateMotion dur="2s" repeatCount="indefinite" path="M50,52 L50,85" />
                     </circle>
                     {% elif battery_discharging %}
                     <!-- Discharging: flow UP from battery to inverter -->
-                    <circle r="6" fill="#ff3366" class="flow-dot">
-                        <animateMotion dur="2s" repeatCount="indefinite" path="M300,350 L300,210" />
+                    <circle r="0.5" fill="#ff3366" class="flow-dot">
+                        <animateMotion dur="2s" repeatCount="indefinite" path="M50,85 L50,52" />
                     </circle>
-                    <circle r="6" fill="#ff3366" class="flow-dot">
-                        <animateMotion dur="2s" repeatCount="indefinite" begin="0.6s" path="M300,350 L300,210" />
+                    <circle r="0.5" fill="#ff3366" class="flow-dot">
+                        <animateMotion dur="2s" repeatCount="indefinite" begin="0.6s" path="M50,85 L50,52" />
                     </circle>
                     {% endif %}
                     
                     <!-- Generator to Inverter line -->
-                    <line x1="300" y1="50" x2="300" y2="190" 
+                    <line x1="50" y1="15" x2="50" y2="48" 
                           stroke="{{ '#ff3366' if generator_on else 'rgba(255,255,255,0.3)' }}" 
-                          stroke-width="3" class="connection-line"/>
+                          stroke-width="1" class="connection-line"/>
                     {% if generator_on %}
-                    <circle r="6" fill="#ff3366" class="flow-dot">
-                        <animateMotion dur="1.5s" repeatCount="indefinite" path="M300,50 L300,190" />
+                    <circle r="0.5" fill="#ff3366" class="flow-dot">
+                        <animateMotion dur="1.5s" repeatCount="indefinite" path="M50,15 L50,48" />
                     </circle>
-                    <circle r="6" fill="#ff3366" class="flow-dot">
-                        <animateMotion dur="1.5s" repeatCount="indefinite" begin="0.3s" path="M300,50 L300,190" />
+                    <circle r="0.5" fill="#ff3366" class="flow-dot">
+                        <animateMotion dur="1.5s" repeatCount="indefinite" begin="0.3s" path="M50,15 L50,48" />
                     </circle>
                     {% endif %}
                 </svg>
                 
-                <!-- Nodes (on top of lines) -->
-                <div class="flow-node solar {{ 'active' if solar_active else '' }}" style="left: 8%; top: 50%; transform: translateY(-50%);">
+                <!-- Nodes (HTML elements) -->
+                <div class="flow-node solar {{ 'active' if solar_active else '' }}" style="left: 10%; top: 50%; transform: translate(-50%, -50%);">
                     <div class="flow-icon">☀️</div>
                     <div class="flow-label">Solar</div>
                     <div class="flow-value">{{ solar_display }}W</div>
@@ -1498,19 +1583,19 @@ def home():
                     <div class="flow-value">{{ inverter_temp }}°C</div>
                 </div>
                 
-                <div class="flow-node load active" style="right: 8%; top: 50%; transform: translateY(-50%);">
+                <div class="flow-node load active" style="right: 10%; top: 50%; transform: translate(50%, -50%);">
                     <div class="flow-icon">🏠</div>
                     <div class="flow-label">Load</div>
                     <div class="flow-value">{{ load_display }}W</div>
                 </div>
                 
-                <div class="flow-node battery {{ 'active' if battery_charging or battery_discharging else '' }}" style="left: 50%; bottom: 8%; transform: translateX(-50%);">
+                <div class="flow-node battery {{ 'active' if battery_charging or battery_discharging else '' }}" style="left: 50%; bottom: 15%; transform: translate(-50%, 50%);">
                     <div class="flow-icon">🔋</div>
                     <div class="flow-label">Battery</div>
                     <div class="flow-value">{{ primary_display }}%</div>
                 </div>
                 
-                <div class="flow-node generator {{ 'active' if generator_on else '' }}" style="left: 50%; top: 8%; transform: translateX(-50%);">
+                <div class="flow-node generator {{ 'active' if generator_on else '' }}" style="left: 50%; top: 15%; transform: translate(-50%, -50%);">
                     <div class="flow-icon">{{ '⚠️' if generator_on else '🔌' }}</div>
                     <div class="flow-label">Generator</div>
                     <div class="flow-value">{{ 'ON' if generator_on else 'OFF' }}</div>
@@ -1854,6 +1939,12 @@ def home():
                 })
                 .catch(err => console.error('Refresh error:', err));
         }, 30000);
+        
+        // Handle window resize for power flow
+        window.addEventListener('resize', function() {
+            // SVG will automatically scale with viewBox and preserveAspectRatio
+            console.log('Window resized - SVG should maintain connections');
+        });
     </script>
 </body>
 </html>
