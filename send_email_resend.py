@@ -52,17 +52,20 @@ COMMUNICATION_TIMEOUT_MINUTES = 10
 # Battery Specifications (LiFePO4)
 # Primary: 30kWh Total Physical
 # 0-20% (6kWh): Hard Cutoff (Unusable)
-# 20-40% (6kWh): Emergency Reserve
-# 40-100% (18kWh): Daily Usable
+# 20-40% (6kWh): Emergency Reserve (Manual/Emergency)
+# 40-100% (18kWh): Daily Automated Cycling
 PRIMARY_BATTERY_CAPACITY_WH = 30000 
-PRIMARY_CUTOFF_PCT = 20
-PRIMARY_RESERVE_PCT = 40
+PRIMARY_DAILY_MIN_PCT = 40 # Below this, primary stops in normal mode
 
 # Backup: 21kWh Total Physical (Degraded)
 # 0-20% (4.2kWh): Hard Cutoff
 # 20-100% (16.8kWh): Usable
 BACKUP_BATTERY_DEGRADED_WH = 21000   
 BACKUP_CUTOFF_PCT = 20
+
+# Total System "Automated" Capacity (for 0-100% chart)
+# 18kWh (Primary Daily) + 16.8kWh (Backup Usable) = 34.8kWh
+TOTAL_SYSTEM_USABLE_WH = 34800 
 
 # Tiered Load Alert System (SOLAR-AWARE - only alerts on battery discharge)
 # TIER 1: Moderate battery discharge (1500-2000W) + Low Battery - 120 min cooldown
@@ -647,119 +650,96 @@ def generate_load_forecast(historical_pattern, moving_avg_load=0):
     return forecast
 
 # ----------------------------
-# UPDATED: Cascade Battery Simulation with Time-to-Empty Calculation
+# UPDATED: Simplified Single-Curve System Prediction
 # ----------------------------
 def calculate_battery_cascade(solar_forecast_data, load_forecast_data, current_primary_percent, backup_active=False):
     """
-    Simulates: Primary Battery -> Backup Battery -> Generator Needed
-    Returns kWh traces and Time-To-Empty string.
+    Calculates a single 'Total System Fuel' percentage (0-100%).
+    100% = Primary 100% + Backup 100%.
+    48% = Switchover Point (Primary 40%, Backup 100%).
+    0% = Backup Empty (20%).
     """
     if not solar_forecast_data or not load_forecast_data:
         return None
     
-    # Calculate starting energy in Wh
-    # Primary: % of 30000 Wh
-    current_primary_wh = (current_primary_percent / 100) * PRIMARY_BATTERY_CAPACITY_WH
+    # 1. Determine Current Energy State (Wh)
+    # Primary Usable Daily = Above 40% (12000Wh). Total Capacity = 30000Wh.
+    # We allow simulation to pull from > 40%.
+    p_wh_total = (current_primary_percent / 100.0) * PRIMARY_BATTERY_CAPACITY_WH
+    p_usable_daily_wh = max(0, p_wh_total - 12000) # Subtract the 40% floor (12k)
     
-    # Backup: Default to 90% full of its degraded capacity if not active
-    current_backup_wh = BACKUP_BATTERY_DEGRADED_WH * 0.9 
+    # Backup Usable = Above 20% (4200Wh). Total = 21000Wh.
+    # Estimate backup current charge (90% default if no voltage reading in this scope, 
+    # but practically we start full if switching).
+    # Ideally we'd pass backup_percent here, but using a safe estimate if not active.
+    b_wh_total = BACKUP_BATTERY_DEGRADED_WH * 0.9 
+    b_usable_wh = max(0, b_wh_total - 4200) # Subtract 20% floor
     
-    # Cutoff Wh thresholds
-    primary_cutoff_wh = PRIMARY_BATTERY_CAPACITY_WH * (PRIMARY_CUTOFF_PCT / 100.0) # 6000Wh
-    backup_cutoff_wh = BACKUP_BATTERY_DEGRADED_WH * (BACKUP_CUTOFF_PCT / 100.0) # 4200Wh
+    # Current Total Usable Fuel
+    current_system_wh = p_usable_daily_wh + b_usable_wh
     
-    # Traces for Charting (kWh)
-    trace_primary_kwh = [current_primary_wh / 1000]
-    trace_backup_kwh = [current_backup_wh / 1000]
-    trace_genset_needed_kwh = [0]
-    trace_deficit_watts = [0]
-    
-    accumulated_genset_wh = 0
-    time_cutoff_reached = None # Store time string when primary hits 20%
+    # Trace for the chart (0-100%)
+    trace_total_pct = [(current_system_wh / TOTAL_SYSTEM_USABLE_WH) * 100]
     
     limit = min(len(solar_forecast_data), len(load_forecast_data))
+    
+    switchover_occurred = False
+    generator_needed = False
+    time_empty = None
     
     for i in range(limit):
         solar = solar_forecast_data[i]['estimated_generation']
         load = load_forecast_data[i]['estimated_load']
-        forecast_time_str = solar_forecast_data[i]['time'].strftime("%I:%M %p") # 10:00 PM
+        time_str = solar_forecast_data[i]['time'].strftime("%I:%M %p")
         
-        # Net Power Deficit (Instantaneous Watts)
         net_watts = load - solar
-        trace_deficit_watts.append(max(0, net_watts))
-        
-        # Energy calculation (Wh for this hour)
         energy_step_wh = net_watts * 1.0 
         
         if energy_step_wh > 0:
-            # We have a deficit
-            
-            # 1. Pull from Primary (Down to Cutoff)
-            available_primary = current_primary_wh - primary_cutoff_wh
-            
-            if available_primary > 0:
-                if available_primary >= energy_step_wh:
-                    current_primary_wh -= energy_step_wh
-                    energy_step_wh = 0
+            # Drain
+            if p_usable_daily_wh >= energy_step_wh:
+                p_usable_daily_wh -= energy_step_wh
+            else:
+                # Primary Daily Empty -> Switch to Backup
+                remaining_deficit = energy_step_wh - p_usable_daily_wh
+                p_usable_daily_wh = 0
+                switchover_occurred = True
+                
+                if b_usable_wh >= remaining_deficit:
+                    b_usable_wh -= remaining_deficit
                 else:
-                    energy_step_wh -= available_primary
-                    current_primary_wh = primary_cutoff_wh
-                    # Record time if this is first time hitting cutoff
-                    if time_cutoff_reached is None:
-                        time_cutoff_reached = forecast_time_str
-            else:
-                # Already at/below cutoff
-                if time_cutoff_reached is None:
-                    time_cutoff_reached = "NOW"
-                
-            # 2. Pull from Backup
-            if energy_step_wh > 0:
-                available_backup = current_backup_wh - backup_cutoff_wh
-                if available_backup > 0:
-                    if available_backup >= energy_step_wh:
-                        current_backup_wh -= energy_step_wh
-                        energy_step_wh = 0
-                    else:
-                        energy_step_wh -= available_backup
-                        current_backup_wh = backup_cutoff_wh
-            
-            # 3. Generator Needed
-            if energy_step_wh > 0:
-                accumulated_genset_wh += energy_step_wh
-                
+                    # Backup Empty -> Generator
+                    b_usable_wh = 0
+                    generator_needed = True
+                    if time_empty is None:
+                        time_empty = time_str
         else:
-            # We have a surplus, charge batteries
-            surplus_wh = abs(energy_step_wh)
-            
-            # Charge Primary first
-            space_in_primary = PRIMARY_BATTERY_CAPACITY_WH - current_primary_wh
-            if surplus_wh <= space_in_primary:
-                current_primary_wh += surplus_wh
-                surplus_wh = 0
+            # Charge (Surplus)
+            surplus = abs(energy_step_wh)
+            # Fill Primary first
+            space_p = 18000 - p_usable_daily_wh # 18k is max daily usable
+            if surplus <= space_p:
+                p_usable_daily_wh += surplus
             else:
-                current_primary_wh = PRIMARY_BATTERY_CAPACITY_WH
-                surplus_wh -= space_in_primary
-                
-            # Charge Backup second
-            space_in_backup = BACKUP_BATTERY_DEGRADED_WH - current_backup_wh
-            if surplus_wh <= space_in_backup:
-                current_backup_wh += surplus_wh
-            else:
-                current_backup_wh = BACKUP_BATTERY_DEGRADED_WH
-
-        # Append to traces (in kWh)
-        trace_primary_kwh.append(current_primary_wh / 1000)
-        trace_backup_kwh.append(current_backup_wh / 1000)
-        trace_genset_needed_kwh.append(accumulated_genset_wh / 1000)
-    
+                p_usable_daily_wh = 18000
+                surplus -= space_p
+                # Fill Backup
+                space_b = 16800 - b_usable_wh
+                if surplus <= space_b:
+                    b_usable_wh += surplus
+                else:
+                    b_usable_wh = 16800
+        
+        # Calculate Percentage
+        total_remaining = p_usable_daily_wh + b_usable_wh
+        pct = (total_remaining / TOTAL_SYSTEM_USABLE_WH) * 100
+        trace_total_pct.append(pct)
+        
     return {
-        'primary_trace': trace_primary_kwh,
-        'backup_trace': trace_backup_kwh,
-        'genset_trace': trace_genset_needed_kwh,
-        'deficit_trace': trace_deficit_watts,
-        'will_need_generator': accumulated_genset_wh > 0,
-        'primary_cutoff_kwh': primary_cutoff_wh / 1000,
-        'time_cutoff_reached': time_cutoff_reached
+        'trace_total_pct': trace_total_pct,
+        'generator_needed': generator_needed,
+        'time_empty': time_empty,
+        'switchover_occurred': switchover_occurred
     }
 
 def update_solar_pattern(current_generation):
@@ -1324,7 +1304,7 @@ def poll_growatt():
             # Display kWh based on the usable capacity being 80% of total degraded
             backup_kwh_calc = (backup_percent_calc / 100) * (BACKUP_BATTERY_DEGRADED_WH / 1000)
             
-            # Calculate battery life prediction (CASCADE LOGIC)
+            # Calculate simplified battery life prediction
             battery_life_prediction = calculate_battery_cascade(
                 solar_forecast, 
                 load_forecast, 
@@ -1412,44 +1392,37 @@ def home():
         for i in range(len(solar_forecast_data)):
             forecast_times.append(solar_forecast_data[i]['time'].strftime('%H:%M'))
 
-    # Battery CASCADE data for new chart
+    # Battery CASCADE data for new simplified chart
     sim_times = []
-    trace_primary = []
-    trace_backup = []
-    trace_genset = []
-    trace_deficit = []
-    primary_cutoff_kwh = 6
-    time_cutoff_reached = None
+    trace_total_pct = []
+    generator_needed = False
+    time_empty = None
+    switchover_occurred = False
     
     if battery_life_prediction:
         sim_times = ["Now"] + forecast_times
-        trace_primary = battery_life_prediction.get('primary_trace', [])
-        trace_backup = battery_life_prediction.get('backup_trace', [])
-        trace_genset = battery_life_prediction.get('genset_trace', [])
-        trace_deficit = battery_life_prediction.get('deficit_trace', [])
-        primary_cutoff_kwh = battery_life_prediction.get('primary_cutoff_kwh', 6)
-        time_cutoff_reached = battery_life_prediction.get('time_cutoff_reached', None)
+        trace_total_pct = battery_life_prediction.get('trace_total_pct', [])
+        generator_needed = battery_life_prediction.get('generator_needed', False)
+        time_empty = battery_life_prediction.get('time_empty', None)
+        switchover_occurred = battery_life_prediction.get('switchover_occurred', False)
         
         # Determine battery prediction message
-        if battery_life_prediction.get('will_need_generator'):
+        if generator_needed:
              pred_class = "critical"
-             pred_message = "🚨 CRITICAL: Generator will be needed!"
-        elif time_cutoff_reached:
+             pred_message = f"🚨 CRITICAL: Generator needed at {time_empty}"
+        elif switchover_occurred:
              pred_class = "warning"
-             pred_message = f"⚠️ WARNING: Primary battery runs out at {time_cutoff_reached}"
+             pred_message = "⚠️ WARNING: Running on Backup Battery"
         else:
              pred_class = "good"
-             pred_message = "✓ OK: Battery sufficient for forecast period."
+             pred_message = "✓ OK: Primary Battery sufficient for now."
     else:
         pred_class = "good"
         pred_message = "Initializing prediction..."
     
     # Convert for JS
     sim_times_json = json.dumps(sim_times)
-    trace_primary_json = json.dumps(trace_primary)
-    trace_backup_json = json.dumps(trace_backup)
-    trace_genset_json = json.dumps(trace_genset)
-    trace_deficit_json = json.dumps(trace_deficit)
+    trace_total_pct_json = json.dumps(trace_total_pct)
     times_json = json.dumps(times)
     load_values_json = json.dumps(load_values)
     battery_values_json = json.dumps(battery_values)
@@ -1946,9 +1919,6 @@ def home():
 """
     
     # NEW BATTERY GAUGES
-    # Gradient Logic:
-    # Primary: 0-20 (Black) | 20-40 (Red-Orange) | 40-100 (Green)
-    # Backup: 0-20 (Black) | 20-100 (Red-Green)
     html += f"""
             <h2>Battery Status</h2>
             <div class="battery-visual-container">
@@ -2011,6 +1981,11 @@ def home():
                             <strong>{backup_voltage_status}</strong>
                         </div>
                     </div>
+                </div>
+                
+                <!-- Manual Reserve Note -->
+                <div style="width:100%; text-align:center; padding:10px; background:#fff3cd; border:1px solid #ffeeba; border-radius:5px; color:#856404; margin-top:10px;">
+                    <strong>ℹ️ Manual Emergency Reserve (6kWh)</strong> available if automated backup fails.
                 </div>
             </div>
 
@@ -2168,66 +2143,47 @@ def home():
         </div>
 """
     
-    # CASCADE CHART (SIMPLIFIED BAR/AREA CHART)
+    # CASCADE CHART (SIMPLIFIED SINGLE-LINE)
     if sim_times:
         html += f"""
         <div class="card">
             <div class="chart-container">
-                <h2>🔋 Battery Drain Prediction</h2>
+                <h2>🔋 Total Fuel Prediction</h2>
                 <p style="color: #666; margin-bottom: 15px; font-size: 0.95em;">
-                    <strong>Simulation Order:</strong> 
-                    <span style="color:#27ae60">■ Primary Battery</span> &rarr; 
-                    <span style="color:#d35400">■ Backup Battery</span> &rarr; 
-                    <span style="color:#c0392b">■ Generator Needed</span>.
-                    <br>Gray bars show instantaneous Power Load (Watts) needed from battery.
-                    <br><strong>Note:</strong> Primary Battery stops at 6kWh (20%). Backup stops at 4.2kWh (20%).
+                    <strong>How to read:</strong> One line for your entire system (Primary + Backup). 
+                    Green is Normal (Primary). Orange is Backup. 
+                    <br>0% means you need the Generator.
                 </p>
                 <canvas id="cascadeChart"></canvas>
             </div>
             
             <script>
                 const cascadeCtx = document.getElementById('cascadeChart').getContext('2d');
+                
+                // Color segment function for line color change
+                function getLineColor(ctx) {{
+                    const index = ctx.p0DataIndex;
+                    const val = ctx.p0.parsed.y;
+                    // Switchover point is ~48%
+                    return val < 48 ? '#fd7e14' : '#28a745'; 
+                }}
+
                 new Chart(cascadeCtx, {{
                     type: 'line',
                     data: {{
                         labels: {sim_times_json},
                         datasets: [
                             {{
-                                type: 'bar',
-                                label: 'Power Draw (Watts)',
-                                data: {trace_deficit_json},
-                                backgroundColor: 'rgba(100, 100, 100, 0.2)',
-                                borderColor: '#666',
-                                borderWidth: 1,
-                                yAxisID: 'y_power',
-                                order: 4
-                            }},
-                            {{
-                                label: 'Generator Needed (kWh)',
-                                data: {trace_genset_json},
-                                backgroundColor: 'rgba(231, 76, 60, 0.6)',
-                                borderColor: '#c0392b',
+                                label: 'Total System Charge',
+                                data: {trace_total_pct_json},
+                                borderColor: 'gray', // Fallback
+                                segment: {{
+                                    borderColor: ctx => getLineColor(ctx)
+                                }},
+                                borderWidth: 4,
+                                tension: 0.3,
                                 fill: true,
-                                yAxisID: 'y_energy',
-                                order: 1
-                            }},
-                            {{
-                                label: 'Backup Battery (kWh)',
-                                data: {trace_backup_json},
-                                backgroundColor: 'rgba(230, 126, 34, 0.5)',
-                                borderColor: '#d35400',
-                                fill: true,
-                                yAxisID: 'y_energy',
-                                order: 2
-                            }},
-                            {{
-                                label: 'Primary Battery (kWh)',
-                                data: {trace_primary_json},
-                                backgroundColor: 'rgba(46, 204, 113, 0.5)',
-                                borderColor: '#27ae60',
-                                fill: true,
-                                yAxisID: 'y_energy',
-                                order: 3
+                                backgroundColor: 'rgba(200, 200, 200, 0.1)'
                             }}
                         ]
                     }},
@@ -2235,39 +2191,41 @@ def home():
                         responsive: true,
                         interaction: {{ mode: 'index', intersect: false }},
                         scales: {{
-                            y_energy: {{
-                                type: 'linear',
-                                display: true,
-                                position: 'left',
-                                title: {{ display: true, text: 'Energy Stored (kWh)', font: {{size:14, weight:'bold'}} }},
-                                stacked: false,
-                                beginAtZero: true,
-                                suggestedMax: 30
-                            }},
-                            y_power: {{
-                                type: 'linear',
-                                display: true,
-                                position: 'right',
-                                title: {{ display: true, text: 'Power Draw (W)', font: {{size:14, weight:'bold'}} }},
-                                grid: {{ drawOnChartArea: false }}
+                            y: {{
+                                min: 0,
+                                max: 100,
+                                title: {{ display: true, text: 'Total Usable Capacity (%)', font: {{weight:'bold'}} }}
                             }}
                         }},
                         plugins: {{
                             annotation: {{
                                 annotations: {{
-                                    cutoffLine: {{
+                                    switchLine: {{
                                         type: 'line',
-                                        yMin: {primary_cutoff_kwh},
-                                        yMax: {primary_cutoff_kwh},
-                                        borderColor: 'red',
+                                        yMin: 48,
+                                        yMax: 48,
+                                        borderColor: '#fd7e14',
                                         borderWidth: 2,
                                         borderDash: [5, 5],
-                                        yScaleID: 'y_energy',
                                         label: {{
-                                            content: 'System Cutoff (20%)',
+                                            content: 'Switch to Backup',
                                             display: true,
-                                            position: 'end',
-                                            backgroundColor: 'rgba(255, 0, 0, 0.8)',
+                                            position: 'start',
+                                            backgroundColor: 'rgba(253, 126, 20, 0.8)',
+                                            color: 'white'
+                                        }}
+                                    }},
+                                    generatorLine: {{
+                                        type: 'line',
+                                        yMin: 0,
+                                        yMax: 0,
+                                        borderColor: '#dc3545',
+                                        borderWidth: 3,
+                                        label: {{
+                                            content: 'GENERATOR START',
+                                            display: true,
+                                            position: 'center',
+                                            backgroundColor: '#dc3545',
                                             color: 'white'
                                         }}
                                     }}
