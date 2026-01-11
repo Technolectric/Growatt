@@ -50,11 +50,12 @@ INVERTER_TEMP_CRITICAL = 70  # °C
 COMMUNICATION_TIMEOUT_MINUTES = 10
 
 # Battery Specifications (LiFePO4)
-PRIMARY_BATTERY_CAPACITY_WH = 30000  # 30kWh
-PRIMARY_BATTERY_USABLE_WH = 18000    # 60% usable (down to 40%)
-BACKUP_BATTERY_CAPACITY_WH = 30000   # 30kWh original
-BACKUP_BATTERY_DEGRADED_WH = 21000   # 70% remaining after 5 years (15% degradation per year)
-BACKUP_BATTERY_USABLE_WH = 14700     # 70% of degraded capacity
+# Primary: 30kWh Total. 80% Usable (24kWh). 
+PRIMARY_BATTERY_CAPACITY_WH = 30000  
+PRIMARY_BATTERY_USABLE_WH = 24000    # 80% of 30kWh is usable for daily cycling
+# Backup: 51V(0%) to 53V(100%). 21kWh Total.
+BACKUP_BATTERY_DEGRADED_WH = 21000   
+BACKUP_BATTERY_USABLE_WH = 14700     
 
 # Tiered Load Alert System (SOLAR-AWARE - only alerts on battery discharge)
 # TIER 1: Moderate battery discharge (1500-2000W) + Low Battery - 120 min cooldown
@@ -1269,6 +1270,11 @@ def poll_growatt():
             backup_voltage_status, backup_voltage_color = get_backup_voltage_status(backup_battery_voltage)
             backup_active = backup_data['OutputPower'] > 50 if backup_data else False
             
+            # Calculate Backup Percent based on Voltage (Linear 51V=0% to 53V=100%)
+            # Formula: (Voltage - 51) / 2 * 100
+            backup_percent_calc = max(0, min(100, (backup_battery_voltage - 51.0) / 2.0 * 100))
+            backup_kwh_calc = (backup_percent_calc / 100) * (BACKUP_BATTERY_DEGRADED_WH / 1000)
+            
             # Calculate battery life prediction (CASCADE LOGIC)
             battery_life_prediction = calculate_battery_cascade(
                 solar_forecast, 
@@ -1288,6 +1294,8 @@ def poll_growatt():
                 "backup_voltage_status": backup_voltage_status,
                 "backup_voltage_color": backup_voltage_color,
                 "backup_active": backup_active,
+                "backup_percent_calc": backup_percent_calc,
+                "backup_kwh_calc": backup_kwh_calc,
                 "generator_running": generator_running,
                 "inverters": inverter_data,
                 "solar_forecast": solar_forecast,
@@ -1324,8 +1332,17 @@ def home():
     total_solar = latest_data.get("total_solar_input_W", 0)
     total_battery_discharge = latest_data.get("total_battery_discharge_W", 0)
     
+    # New Battery Calculations for Dashboard Display
+    # Primary: BMS % reflects full 30kWh
+    primary_kwh_real = (primary_battery / 100.0) * (PRIMARY_BATTERY_CAPACITY_WH / 1000.0)
+    
+    # Backup: Calculated based on voltage (passed from poll loop)
+    backup_percent_display = latest_data.get("backup_percent_calc", 0)
+    backup_kwh_display = latest_data.get("backup_kwh_calc", 0)
+    
     # Color coding
-    primary_color = "red" if primary_battery < 40 else ("orange" if primary_battery < 50 else "green")
+    primary_color = "#dc3545" if primary_battery < 20 else ("#ff9800" if primary_battery < 40 else "#28a745")
+    backup_color = "#dc3545" if backup_percent_display < 20 else ("#ff9800" if backup_percent_display < 50 else "#28a745")
     
     # Chart data
     times = [t.strftime('%H:%M') for t, p in load_history]
@@ -1529,6 +1546,89 @@ def home():
             font-weight: 500;
         }}
         
+        /* New Battery Gauge Styles */
+        .battery-visual-container {{
+            display: flex;
+            gap: 20px;
+            margin-bottom: 30px;
+            flex-wrap: wrap;
+        }}
+        
+        .batt-card {{
+            flex: 1;
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.1);
+            min-width: 300px;
+            border: 1px solid #eee;
+        }}
+        
+        .batt-header {{
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }}
+        
+        .batt-title {{
+            font-weight: bold;
+            color: #444;
+            font-size: 1.1em;
+        }}
+        
+        .batt-bar-container {{
+            position: relative;
+            height: 35px;
+            background: #eee;
+            border-radius: 18px;
+            overflow: hidden;
+            box-shadow: inset 0 2px 5px rgba(0,0,0,0.1);
+        }}
+        
+        .batt-bar-fill {{
+            height: 100%;
+            transition: width 1s ease-in-out;
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            padding-right: 15px;
+            color: white;
+            font-weight: bold;
+            text-shadow: 1px 1px 2px rgba(0,0,0,0.3);
+            font-size: 0.95em;
+        }}
+        
+        .batt-marker {{
+            position: absolute;
+            top: 0;
+            bottom: 0;
+            width: 2px;
+            background: rgba(0,0,0,0.3);
+            z-index: 2;
+        }}
+        
+        .batt-marker-label {{
+            position: absolute;
+            top: -20px;
+            font-size: 0.75em;
+            color: #666;
+            transform: translateX(-50%);
+        }}
+        
+        .batt-details {{
+            margin-top: 15px;
+            display: flex;
+            justify-content: space-between;
+            font-size: 0.9em;
+            color: #666;
+        }}
+        
+        .batt-detail-item strong {{
+            color: #333;
+            font-size: 1.2em;
+        }}
+
         .metrics-grid {{
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
@@ -1715,6 +1815,9 @@ def home():
                 grid-template-columns: 1fr;
                 gap: 8px;
             }}
+            .battery-visual-container {{
+                flex-direction: column;
+            }}
         }}
     </style>
 </head>
@@ -1775,26 +1878,72 @@ def home():
             <div class="battery-prediction {pred_class}">
                 <h3>🔋 Battery Life Prediction</h3>
                 <p><strong>{pred_message}</strong></p>
-                <p><strong>Current Status:</strong> {primary_battery:.0f}% = {(primary_battery/100)*18:.1f}kWh usable of {PRIMARY_BATTERY_USABLE_WH/1000:.0f}kWh</p>
-                <p><strong>Backup Reserve:</strong> {BACKUP_BATTERY_USABLE_WH/1000:.0f}kWh available (5yo LiFePO4, ~70% capacity)</p>
+                <p><strong>Status:</strong> {primary_battery:.0f}% Primary | {backup_voltage:.1f}V Backup</p>
                 <p style="font-size: 0.85em; opacity: 0.8;">Based on {historical_pattern_count} solar patterns & {load_pattern_count} load patterns</p>
             </div>
 """
     
+    # NEW BATTERY GAUGES
     html += f"""
+            <h2>Battery Status</h2>
+            <div class="battery-visual-container">
+                <!-- PRIMARY BATTERY GAUGE -->
+                <div class="batt-card">
+                    <div class="batt-header">
+                        <span class="batt-title">Primary Battery</span>
+                        <span style="color: {primary_color}">{primary_battery:.0f}%</span>
+                    </div>
+                    <div class="batt-bar-container">
+                        <div class="batt-marker" style="left: 20%;">
+                            <span class="batt-marker-label">Reserve</span>
+                        </div>
+                        <div class="batt-bar-fill" style="width: {primary_battery}%; background: {primary_color};">
+                            {primary_battery:.0f}%
+                        </div>
+                    </div>
+                    <div class="batt-details">
+                        <div class="batt-detail-item">
+                            <div>Real Energy</div>
+                            <strong>{primary_kwh_real:.1f} kWh</strong>
+                        </div>
+                        <div class="batt-detail-item" style="text-align: right;">
+                            <div>Total Cap</div>
+                            <strong>30 kWh</strong>
+                        </div>
+                    </div>
+                    <div style="margin-top: 5px; font-size: 0.8em; color: #888; text-align: center;">
+                        80% Usable + 20% Emergency Reserve
+                    </div>
+                </div>
+
+                <!-- BACKUP BATTERY GAUGE -->
+                <div class="batt-card">
+                    <div class="batt-header">
+                        <span class="batt-title">Backup Battery</span>
+                        <span style="color: {backup_color}">{backup_voltage:.1f}V</span>
+                    </div>
+                    <div class="batt-bar-container">
+                        <div class="batt-bar-fill" style="width: {backup_percent_display}%; background: {backup_color};">
+                            {backup_voltage:.1f}V
+                        </div>
+                    </div>
+                    <div class="batt-details">
+                        <div class="batt-detail-item">
+                            <div>Est. Energy</div>
+                            <strong>~{backup_kwh_display:.1f} kWh</strong>
+                        </div>
+                        <div class="batt-detail-item" style="text-align: right;">
+                            <div>Status</div>
+                            <strong>{backup_voltage_status}</strong>
+                        </div>
+                    </div>
+                    <div style="margin-top: 5px; font-size: 0.8em; color: #888; text-align: center;">
+                        Calculated from Voltage (51V-53V) | ~21kWh Max
+                    </div>
+                </div>
+            </div>
+
             <div class="metrics-grid">
-                <div class="metric {primary_color}">
-                    <div class="metric-label">Primary Batteries</div>
-                    <div class="metric-value">{primary_battery:.0f}%</div>
-                    <div class="metric-subtext">{(primary_battery/100) * (PRIMARY_BATTERY_USABLE_WH/1000):.1f}kWh of {PRIMARY_BATTERY_USABLE_WH/1000:.0f}kWh</div>
-                </div>
-                
-                <div class="metric {backup_voltage_color}">
-                    <div class="metric-label">Backup Battery</div>
-                    <div class="metric-value">{backup_voltage:.1f}V</div>
-                    <div class="metric-subtext">{backup_voltage_status} | {BACKUP_BATTERY_USABLE_WH/1000:.0f}kWh capacity</div>
-                </div>
-                
                 <div class="metric blue">
                     <div class="metric-label">Total Load</div>
                     <div class="metric-value">{total_load:.0f}W</div>
