@@ -80,7 +80,6 @@ pool_pump_start_time = None
 pool_pump_last_alert = None
 
 # Historical Data & Forecast Containers
-# Increased to hold ~14 days of 5-min polling data (14 * 24 * 12 = 4032)
 solar_forecast = []
 solar_generation_pattern = deque(maxlen=5000)
 load_demand_pattern = deque(maxlen=5000)
@@ -608,7 +607,12 @@ def home():
     # 3. Smart Schedule Logic
     schedule_html = ""
     forecast_data = latest_data.get('solar_forecast', [])
-    if forecast_data:
+    
+    # Override logic: If status is "COOK NOW" or "OVEN SAFE", ignore bad forecast warnings
+    if "COOK NOW" in app_st or "OVEN" in app_st:
+         schedule_html += '<li style="margin-bottom:10px; color:#28a745"><strong>⚡ Current Window:</strong><br>Battery is full. Safe to use heavy loads now.</li>'
+         
+    elif forecast_data:
         best_start, best_end, current_run = None, None, 0
         best_max_gen = 0
         for d in forecast_data:
@@ -636,13 +640,21 @@ def home():
         if next_3_gen < 500 and 8 <= datetime.now(EAT).hour <= 16:
             schedule_html += '<li style="margin-bottom:10px; color:#fd7e14"><strong>☁️ Cloud Warning:</strong><br>Low solar for next 3 hours.</li>'
         schedule_html += '</ul>'
+    else:
+        schedule_html += "<ul><li>Initializing...</li></ul>"
     
-    # 4. Chart Data Preparation (Downsampled for 2 Weeks)
-    # We take every 12th point (1 per hour) to keep the chart performant
-    downsample_rate = 12 
-    times = [t.strftime('%d %b %H:%M') for i, (t, p) in enumerate(load_history) if i % downsample_rate == 0]
-    l_vals = [p for i, (t, p) in enumerate(load_history) if i % downsample_rate == 0]
-    b_vals = [p for i, (t, p) in enumerate(battery_history) if i % downsample_rate == 0]
+    # 4. Chart Data (Fixing Empty Graph by Pre-filling if empty)
+    if not load_history:
+        # Pre-fill with current single point so chart isn't empty on restart
+        times = [datetime.now(EAT).strftime('%d %b %H:%M')]
+        l_vals = [tot_load]
+        b_vals = [tot_dis]
+    else:
+        # We take every 12th point (1 per hour) to keep the chart performant
+        downsample_rate = 12 
+        times = [t.strftime('%d %b %H:%M') for i, (t, p) in enumerate(load_history) if i % downsample_rate == 0]
+        l_vals = [p for i, (t, p) in enumerate(load_history) if i % downsample_rate == 0]
+        b_vals = [p for i, (t, p) in enumerate(battery_history) if i % downsample_rate == 0]
     
     pred = latest_data.get("battery_life_prediction")
     sim_t = ["Now"] + [d['time'].strftime('%H:%M') for d in latest_data.get("solar_forecast", [])]
@@ -678,8 +690,9 @@ def home():
         .flow-container {{ display: grid; grid-template-columns: 1fr 1fr 1fr; grid-template-rows: 80px 80px 80px; gap: 0px; text-align: center; align-items: center; justify-items: center; margin-bottom:20px; position:relative; }}
         
         .f-icon {{ font-size: 2em; background: white; padding: 10px; border-radius: 50%; box-shadow: 0 4px 10px rgba(0,0,0,0.1); width: 45px; height: 45px; display:flex; align-items:center; justify-content:center; position:relative; z-index:2; }}
-        .hub-box {{ width: 80px; height: 80px; background: #333; color: white; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 0.9em; box-shadow: 0 4px 15px rgba(0,0,0,0.3); z-index:5; }}
+        .hub-box {{ width: 50px; height: 50px; background: white; color: #333; border-radius: 10px; display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 1.5em; box-shadow: 0 4px 15px rgba(0,0,0,0.3); z-index:5; border: 2px solid #333; }}
         
+        /* Connected Lines (Z-Index 1 to sit behind icons) */
         .f-line-h {{ position: relative; width: 100%; height: 6px; background: #ddd; border-radius: 3px; z-index:1; }}
         .f-line-v {{ position: relative; width: 6px; height: 100%; background: #ddd; border-radius: 3px; z-index:1; }}
         
@@ -760,7 +773,7 @@ def home():
                 
                 <!-- Hub (Center) -->
                 <div class="c-hub">
-                    <div class="hub-box">HUB</div>
+                    <div class="hub-box">⚡</div>
                 </div>
 
                 <!-- House (Right) -->
