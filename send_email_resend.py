@@ -555,18 +555,25 @@ def api_data():
 @app.route("/")
 def home():
     # Prepare all data
-    p_bat = latest_data.get("primary_battery_min", 0)
-    b_volt = latest_data.get("backup_battery_voltage", 0)
+    def _num(val, default=0.0):
+        try:
+            return float(val)
+        except (TypeError, ValueError):
+            return default
+
+    p_bat = _num(latest_data.get("primary_battery_min", 0))
+    b_volt = _num(latest_data.get("backup_battery_voltage", 0))
     b_stat = latest_data.get("backup_voltage_status", "Unknown")
-    b_active = latest_data.get("backup_active", False)
-    gen_on = latest_data.get("generator_running", False)
-    tot_load = latest_data.get("total_output_power", 0)
-    tot_sol = latest_data.get("total_solar_input_W", 0)
-    tot_dis = latest_data.get("total_battery_discharge_W", 0)
-    
+    b_active = bool(latest_data.get("backup_active", False))
+    gen_on = bool(latest_data.get("generator_running", False))
+    tot_load = _num(latest_data.get("total_output_power", 0))
+    tot_sol = _num(latest_data.get("total_solar_input_W", 0))
+    tot_dis = _num(latest_data.get("total_battery_discharge_W", 0))
+
     p_kwh = (p_bat / 100.0) * 30.0
-    b_pct = latest_data.get("backup_percent_calc", 0)
-    b_kwh = latest_data.get("backup_kwh_calc", 0)
+    b_pct = _num(latest_data.get("backup_percent_calc", 0))
+    b_kwh = _num(latest_data.get("backup_kwh_calc", 0))
+
     
     sol_cond = solar_conditions_cache
     weather_bad = sol_cond and sol_cond['poor_conditions']
