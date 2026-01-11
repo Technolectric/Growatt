@@ -50,17 +50,19 @@ INVERTER_TEMP_CRITICAL = 70  # °C
 COMMUNICATION_TIMEOUT_MINUTES = 10
 
 # Battery Specifications (LiFePO4)
-# Primary: 30kWh Total. 
-# 0-20% (6kWh): Hard Cutoff
+# Primary: 30kWh Total Physical
+# 0-20% (6kWh): Hard Cutoff (Unusable)
 # 20-40% (6kWh): Emergency Reserve
 # 40-100% (18kWh): Daily Usable
-PRIMARY_BATTERY_CAPACITY_WH = 30000  
-PRIMARY_BATTERY_USABLE_WH = 18000    # The top 60% is for daily cycling
+PRIMARY_BATTERY_CAPACITY_WH = 30000 
+PRIMARY_CUTOFF_PCT = 20
+PRIMARY_RESERVE_PCT = 40
 
-# Backup: 21kWh Total (Degraded). 
-# 80% Usable (cuts off at 20%)
+# Backup: 21kWh Total Physical (Degraded)
+# 0-20% (4.2kWh): Hard Cutoff
+# 20-100% (16.8kWh): Usable
 BACKUP_BATTERY_DEGRADED_WH = 21000   
-BACKUP_BATTERY_USABLE_WH = 16800     # 80% of 21kWh
+BACKUP_CUTOFF_PCT = 20
 
 # Tiered Load Alert System (SOLAR-AWARE - only alerts on battery discharge)
 # TIER 1: Moderate battery discharge (1500-2000W) + Low Battery - 120 min cooldown
@@ -632,24 +634,32 @@ def generate_load_forecast(historical_pattern, moving_avg_load=0):
     return forecast
 
 # ----------------------------
-# UPDATED: Cascade Battery Simulation
+# UPDATED: Cascade Battery Simulation with New Limits
 # ----------------------------
 def calculate_battery_cascade(solar_forecast_data, load_forecast_data, current_primary_percent, backup_active=False):
     """
     Simulates: Primary Battery -> Backup Battery -> Generator Needed
+    Respects hard cutoffs and usable ranges.
     """
     if not solar_forecast_data or not load_forecast_data:
         return None
     
-    # Calculate starting energy
-    current_primary_wh = (current_primary_percent / 100) * PRIMARY_BATTERY_USABLE_WH
-    current_backup_wh = BACKUP_BATTERY_USABLE_WH * 0.8 # Assume 80% if not tracked explicitly
+    # Calculate starting energy in Wh
+    # Primary: % of 30000 Wh
+    current_primary_wh = (current_primary_percent / 100) * PRIMARY_BATTERY_CAPACITY_WH
     
-    # Traces for Charting
-    trace_primary_kwh = [current_primary_wh / 1000]
-    trace_backup_kwh = [current_backup_wh / 1000]
+    # Backup: Default to 80% full of its degraded capacity if not active, or track if we had sensors
+    # For sim, assume full usable if not active, or estimated
+    current_backup_wh = BACKUP_BATTERY_DEGRADED_WH * 0.9 # Assume 90% charge start
+    
+    # Cutoff Wh thresholds
+    primary_cutoff_wh = PRIMARY_BATTERY_CAPACITY_WH * (PRIMARY_CUTOFF_PCT / 100.0) # 6000Wh
+    backup_cutoff_wh = BACKUP_BATTERY_DEGRADED_WH * (BACKUP_CUTOFF_PCT / 100.0) # 4200Wh
+    
+    # Traces for Charting (Convert back to % for easier reading)
+    trace_primary_pct = [current_primary_percent]
+    trace_backup_pct = [90] # Estimated start
     trace_genset_needed_kwh = [0]
-    trace_deficit_watts = [0]
     
     accumulated_genset_wh = 0
     
@@ -661,7 +671,6 @@ def calculate_battery_cascade(solar_forecast_data, load_forecast_data, current_p
         
         # Net Power Deficit (Instantaneous Watts)
         net_watts = load - solar
-        trace_deficit_watts.append(max(0, net_watts))
         
         # Energy calculation (Wh for this hour)
         energy_step_wh = net_watts * 1.0 
@@ -669,22 +678,27 @@ def calculate_battery_cascade(solar_forecast_data, load_forecast_data, current_p
         if energy_step_wh > 0:
             # We have a deficit, need to pull from storage
             
-            # 1. Pull from Primary
-            if current_primary_wh >= energy_step_wh:
-                current_primary_wh -= energy_step_wh
-                energy_step_wh = 0
-            else:
-                energy_step_wh -= current_primary_wh
-                current_primary_wh = 0
-                
-            # 2. Pull from Backup (if Primary empty)
-            if energy_step_wh > 0:
-                if current_backup_wh >= energy_step_wh:
-                    current_backup_wh -= energy_step_wh
+            # 1. Pull from Primary (Down to Cutoff)
+            available_primary = current_primary_wh - primary_cutoff_wh
+            
+            if available_primary > 0:
+                if available_primary >= energy_step_wh:
+                    current_primary_wh -= energy_step_wh
                     energy_step_wh = 0
                 else:
-                    energy_step_wh -= current_backup_wh
-                    current_backup_wh = 0
+                    energy_step_wh -= available_primary
+                    current_primary_wh = primary_cutoff_wh
+                
+            # 2. Pull from Backup (if Primary empty/cutoff)
+            if energy_step_wh > 0:
+                available_backup = current_backup_wh - backup_cutoff_wh
+                if available_backup > 0:
+                    if available_backup >= energy_step_wh:
+                        current_backup_wh -= energy_step_wh
+                        energy_step_wh = 0
+                    else:
+                        energy_step_wh -= available_backup
+                        current_backup_wh = backup_cutoff_wh
             
             # 3. Generator Needed (if both empty)
             if energy_step_wh > 0:
@@ -695,28 +709,33 @@ def calculate_battery_cascade(solar_forecast_data, load_forecast_data, current_p
             surplus_wh = abs(energy_step_wh)
             
             # Charge Primary first
-            space_in_primary = PRIMARY_BATTERY_USABLE_WH - current_primary_wh
+            space_in_primary = PRIMARY_BATTERY_CAPACITY_WH - current_primary_wh
             if surplus_wh <= space_in_primary:
                 current_primary_wh += surplus_wh
                 surplus_wh = 0
             else:
-                current_primary_wh = PRIMARY_BATTERY_USABLE_WH
+                current_primary_wh = PRIMARY_BATTERY_CAPACITY_WH
                 surplus_wh -= space_in_primary
                 
             # Charge Backup second (if primary full)
-            current_backup_wh = min(current_backup_wh + surplus_wh, BACKUP_BATTERY_USABLE_WH)
+            space_in_backup = BACKUP_BATTERY_DEGRADED_WH - current_backup_wh
+            if surplus_wh <= space_in_backup:
+                current_backup_wh += surplus_wh
+            else:
+                current_backup_wh = BACKUP_BATTERY_DEGRADED_WH
 
-        trace_primary_kwh.append(current_primary_wh / 1000)
-        trace_backup_kwh.append(current_backup_wh / 1000)
+        # Convert back to % for the chart
+        trace_primary_pct.append((current_primary_wh / PRIMARY_BATTERY_CAPACITY_WH) * 100)
+        trace_backup_pct.append((current_backup_wh / BACKUP_BATTERY_DEGRADED_WH) * 100)
         trace_genset_needed_kwh.append(accumulated_genset_wh / 1000)
     
     return {
-        'primary_trace': trace_primary_kwh,
-        'backup_trace': trace_backup_kwh,
+        'primary_trace_pct': trace_primary_pct,
+        'backup_trace_pct': trace_backup_pct,
         'genset_trace': trace_genset_needed_kwh,
-        'deficit_trace': trace_deficit_watts,
         'will_need_generator': accumulated_genset_wh > 0,
-        'genset_kwh_needed': accumulated_genset_wh / 1000
+        'enter_reserve': any(p < 40 for p in trace_primary_pct),
+        'enter_cutoff': any(p <= 20 for p in trace_primary_pct)
     }
 
 def update_solar_pattern(current_generation):
@@ -1346,7 +1365,7 @@ def home():
     backup_percent_display = latest_data.get("backup_percent_calc", 0)
     backup_kwh_display = latest_data.get("backup_kwh_calc", 0)
     
-    # Color coding
+    # Color coding for TEXT
     primary_color = "#dc3545" if primary_battery < 20 else ("#ff9800" if primary_battery < 40 else "#28a745")
     backup_color = "#dc3545" if backup_percent_display < 20 else ("#ff9800" if backup_percent_display < 50 else "#28a745")
     
@@ -1364,41 +1383,31 @@ def home():
     
     # Prepare forecast chart data
     forecast_times = []
-    solar_forecast_values = []
-    load_forecast_values = []
-    net_deficit_values = []
     
-    if solar_forecast_data and load_forecast_data:
-        for i in range(min(len(solar_forecast_data), len(load_forecast_data))):
+    if solar_forecast_data:
+        for i in range(len(solar_forecast_data)):
             forecast_times.append(solar_forecast_data[i]['time'].strftime('%H:%M'))
-            solar_forecast_values.append(solar_forecast_data[i]['estimated_generation'])
-            load_forecast_values.append(load_forecast_data[i]['estimated_load'])
-            
-            # Calculate net deficit (positive = need battery, negative = surplus)
-            net_deficit = load_forecast_data[i]['estimated_load'] - solar_forecast_data[i]['estimated_generation']
-            net_deficit_values.append(net_deficit)
-    
+
     # Battery CASCADE data for new chart
     sim_times = []
-    trace_primary = []
-    trace_backup = []
-    trace_genset = []
-    trace_deficit = []
+    trace_primary_pct = []
+    trace_backup_pct = []
     
     if battery_life_prediction:
         sim_times = ["Now"] + forecast_times
-        trace_primary = battery_life_prediction.get('primary_trace', [])
-        trace_backup = battery_life_prediction.get('backup_trace', [])
-        trace_genset = battery_life_prediction.get('genset_trace', [])
-        trace_deficit = battery_life_prediction.get('deficit_trace', [])
+        trace_primary_pct = battery_life_prediction.get('primary_trace_pct', [])
+        trace_backup_pct = battery_life_prediction.get('backup_trace_pct', [])
         
         # Determine battery prediction message
         if battery_life_prediction.get('will_need_generator'):
              pred_class = "critical"
              pred_message = "🚨 CRITICAL: Generator will be needed!"
-        elif trace_primary and min(trace_primary) <= 0:
+        elif battery_life_prediction.get('enter_cutoff'):
+             pred_class = "critical"
+             pred_message = "⚠️ WARNING: Primary battery will hit CUTOFF (20%)."
+        elif battery_life_prediction.get('enter_reserve'):
              pred_class = "warning"
-             pred_message = "⚠️ WARNING: Primary battery will deplete."
+             pred_message = "⚠️ WARNING: Conserve Energy (Entering Reserve)."
         else:
              pred_class = "good"
              pred_message = "✓ OK: Battery sufficient for forecast period."
@@ -1408,10 +1417,8 @@ def home():
     
     # Convert for JS
     sim_times_json = json.dumps(sim_times)
-    trace_primary_json = json.dumps(trace_primary)
-    trace_backup_json = json.dumps(trace_backup)
-    trace_genset_json = json.dumps(trace_genset)
-    trace_deficit_json = json.dumps(trace_deficit)
+    trace_primary_pct_json = json.dumps(trace_primary_pct)
+    trace_backup_pct_json = json.dumps(trace_backup_pct)
     times_json = json.dumps(times)
     load_values_json = json.dumps(load_values)
     battery_values_json = json.dumps(battery_values)
@@ -1425,6 +1432,7 @@ def home():
 <head>
     <title>Tulia House - Solar Monitor</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@2.1.0/dist/chartjs-plugin-annotation.min.js"></script>
     <style>
         * {{
             margin: 0;
@@ -1583,13 +1591,13 @@ def home():
             font-size: 1.1em;
         }}
         
+        /* Bar container now has the zone gradient */
         .batt-bar-container {{
             position: relative;
             height: 35px;
-            background: #eee;
             border-radius: 18px;
             overflow: hidden;
-            box-shadow: inset 0 2px 5px rgba(0,0,0,0.1);
+            box-shadow: inset 0 2px 5px rgba(0,0,0,0.3);
             margin-bottom: 20px;
             margin-top: 15px;
         }}
@@ -1597,14 +1605,33 @@ def home():
         .batt-bar-fill {{
             height: 100%;
             transition: width 1s ease-in-out;
-            display: flex;
-            align-items: center;
-            justify-content: flex-end;
-            padding-right: 15px;
-            color: white;
-            font-weight: bold;
-            text-shadow: 1px 1px 2px rgba(0,0,0,0.3);
-            font-size: 0.95em;
+            position: relative;
+            border-right: 3px solid white; 
+            background: rgba(255, 255, 255, 0.2); /* Subtle highlight for filled portion */
+        }}
+        
+        /* Mask the empty part to grey/white so the gradient shows only on filled part? 
+           OR: Show the gradient map and the fill reveals it. 
+           Let's do: Background is the map. Filled part is Clear/Transparent. Empty part is Opaque White.
+           Actually simpler: Background is Grey. Fill is the gradient.
+           But user asked for gradient zones. 
+           Let's make the BACKGROUND the zones (Black->Red->Green). 
+           Then put a "Curtain" on top that slides right to reveal it. 
+        */
+        
+        .batt-bar-zone-bg {{
+            position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+            z-index: 1;
+        }}
+        
+        .batt-bar-curtain {{
+            position: absolute;
+            top: 0; right: 0; bottom: 0;
+            background: #eee;
+            z-index: 2;
+            transition: width 1s ease-in-out;
+            border-left: 2px solid #666;
         }}
         
         .batt-marker {{
@@ -1612,8 +1639,8 @@ def home():
             top: 0;
             bottom: 0;
             width: 2px;
-            background: rgba(0,0,0,0.3);
-            z-index: 2;
+            background: rgba(255,255,255,0.8);
+            z-index: 3;
         }}
         
         .batt-marker-label {{
@@ -1623,6 +1650,18 @@ def home():
             color: #666;
             transform: translateX(-50%);
             white-space: nowrap;
+        }}
+        
+        .batt-value-overlay {{
+            position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+            z-index: 4;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            color: white;
+            text-shadow: 1px 1px 3px black;
         }}
         
         .batt-details {{
@@ -1893,6 +1932,9 @@ def home():
 """
     
     # NEW BATTERY GAUGES
+    # Gradient Logic:
+    # Primary: 0-20 (Black) | 20-40 (Red-Orange) | 40-100 (Green)
+    # Backup: 0-20 (Black) | 20-100 (Red-Green)
     html += f"""
             <h2>Battery Status</h2>
             <div class="battery-visual-container">
@@ -1903,18 +1945,17 @@ def home():
                         <span style="color: {primary_color}">{primary_battery:.0f}%</span>
                     </div>
                     <div class="batt-bar-container">
-                        <!-- Marker at 20% (Cutoff) -->
-                        <div class="batt-marker" style="left: 20%;">
-                            <span class="batt-marker-label">Cutoff</span>
-                        </div>
-                        <!-- Marker at 40% (Reserve) -->
-                        <div class="batt-marker" style="left: 40%;">
-                            <span class="batt-marker-label">Reserve</span>
-                        </div>
+                        <!-- THE ZONES -->
+                        <div class="batt-bar-zone-bg" style="background: linear-gradient(to right, black 0%, black 20%, #dc3545 20%, #fd7e14 40%, #28a745 40%, #28a745 100%);"></div>
                         
-                        <div class="batt-bar-fill" style="width: {primary_battery}%; background: {primary_color};">
-                            {primary_battery:.0f}%
-                        </div>
+                        <!-- THE CURTAIN (Reveals the zone) -->
+                        <div class="batt-bar-curtain" style="width: {100 - primary_battery}%;"></div>
+                        
+                        <!-- Markers -->
+                        <div class="batt-marker" style="left: 20%;"><span class="batt-marker-label">Cutoff (6kWh)</span></div>
+                        <div class="batt-marker" style="left: 40%;"><span class="batt-marker-label">Reserve</span></div>
+                        
+                        <div class="batt-value-overlay">{primary_battery:.0f}%</div>
                     </div>
                     <div class="batt-details">
                         <div class="batt-detail-item">
@@ -1926,9 +1967,6 @@ def home():
                             <strong>30 kWh</strong>
                         </div>
                     </div>
-                    <div style="margin-top: 5px; font-size: 0.8em; color: #888; text-align: center;">
-                        40-100% Daily Usable | 20-40% Emergency | 0-20% Cutoff
-                    </div>
                 </div>
 
                 <!-- BACKUP BATTERY GAUGE -->
@@ -1938,9 +1976,16 @@ def home():
                         <span style="color: {backup_color}">{backup_voltage:.1f}V</span>
                     </div>
                     <div class="batt-bar-container">
-                        <div class="batt-bar-fill" style="width: {backup_percent_display}%; background: {backup_color};">
-                            {backup_voltage:.1f}V
-                        </div>
+                        <!-- THE ZONES -->
+                        <div class="batt-bar-zone-bg" style="background: linear-gradient(to right, black 0%, black 20%, #dc3545 20%, #28a745 100%);"></div>
+                        
+                        <!-- THE CURTAIN -->
+                        <div class="batt-bar-curtain" style="width: {100 - backup_percent_display}%;"></div>
+                        
+                        <!-- Markers -->
+                        <div class="batt-marker" style="left: 20%;"><span class="batt-marker-label">Cutoff (4.2kWh)</span></div>
+                        
+                        <div class="batt-value-overlay">{backup_voltage:.1f}V</div>
                     </div>
                     <div class="batt-details">
                         <div class="batt-detail-item">
@@ -1951,9 +1996,6 @@ def home():
                             <div>Status</div>
                             <strong>{backup_voltage_status}</strong>
                         </div>
-                    </div>
-                    <div style="margin-top: 5px; font-size: 0.8em; color: #888; text-align: center;">
-                        21kWh Total | 80% Usable | Linear Scale 51V-53V
                     </div>
                 </div>
             </div>
@@ -2112,18 +2154,16 @@ def home():
         </div>
 """
     
-    # CASCADE CHART
+    # CASCADE CHART (SIMPLIFIED FOR END USER)
     if sim_times:
         html += f"""
         <div class="card">
             <div class="chart-container">
-                <h2>🔋 Power Deficit & Battery Cascade Prediction</h2>
+                <h2>🔋 Battery State Prediction</h2>
                 <p style="color: #666; margin-bottom: 15px; font-size: 0.95em;">
-                    <strong>Simulation Order:</strong> 
-                    <span style="color:#27ae60">■ Primary Battery</span> &rarr; 
-                    <span style="color:#d35400">■ Backup Battery</span> &rarr; 
-                    <span style="color:#c0392b">■ Generator Needed</span>.
-                    <br>Gray bars show instantaneous power deficit (Load - Solar).
+                    <strong>How to read:</strong> The green line is your Primary Battery. 
+                    If it dips into the <span style="color:#d35400; font-weight:bold;">Orange Zone</span>, you are using emergency reserves.
+                    If it hits the <span style="color:black; font-weight:bold;">Black Line</span>, the system will switch to Backup.
                 </p>
                 <canvas id="cascadeChart"></canvas>
             </div>
@@ -2136,41 +2176,24 @@ def home():
                         labels: {sim_times_json},
                         datasets: [
                             {{
-                                type: 'bar',
-                                label: 'Net Deficit (W)',
-                                data: {trace_deficit_json},
-                                backgroundColor: 'rgba(100, 100, 100, 0.2)',
-                                borderColor: '#666',
-                                borderWidth: 1,
-                                yAxisID: 'y_power',
-                                order: 4
+                                label: 'Primary Battery %',
+                                data: {trace_primary_pct_json},
+                                borderColor: '#28a745',
+                                backgroundColor: 'rgba(40, 167, 69, 0.1)',
+                                borderWidth: 3,
+                                fill: false,
+                                tension: 0.4,
+                                z: 10
                             }},
                             {{
-                                label: 'Generator Needed (kWh)',
-                                data: {trace_genset_json},
-                                backgroundColor: 'rgba(231, 76, 60, 0.6)',
-                                borderColor: '#c0392b',
-                                fill: true,
-                                yAxisID: 'y_energy',
-                                order: 1
-                            }},
-                            {{
-                                label: 'Backup Battery (kWh)',
-                                data: {trace_backup_json},
-                                backgroundColor: 'rgba(230, 126, 34, 0.5)',
-                                borderColor: '#d35400',
-                                fill: true,
-                                yAxisID: 'y_energy',
-                                order: 2
-                            }},
-                            {{
-                                label: 'Primary Battery (kWh)',
-                                data: {trace_primary_json},
-                                backgroundColor: 'rgba(46, 204, 113, 0.5)',
-                                borderColor: '#27ae60',
-                                fill: true,
-                                yAxisID: 'y_energy',
-                                order: 3
+                                label: 'Backup Battery %',
+                                data: {trace_backup_pct_json},
+                                borderColor: '#dc3545',
+                                borderDash: [5, 5],
+                                borderWidth: 2,
+                                fill: false,
+                                tension: 0.4,
+                                hidden: true 
                             }}
                         ]
                     }},
@@ -2178,21 +2201,42 @@ def home():
                         responsive: true,
                         interaction: {{ mode: 'index', intersect: false }},
                         scales: {{
-                            y_energy: {{
-                                type: 'linear',
-                                display: true,
-                                position: 'left',
-                                title: {{ display: true, text: 'Energy (kWh)', font: {{size:14, weight:'bold'}} }},
-                                stacked: false,
-                                beginAtZero: true,
-                                suggestedMax: 30
-                            }},
-                            y_power: {{
-                                type: 'linear',
-                                display: true,
-                                position: 'right',
-                                title: {{ display: true, text: 'Deficit (W)', font: {{size:14, weight:'bold'}} }},
-                                grid: {{ drawOnChartArea: false }}
+                            y: {{
+                                title: {{ display: true, text: 'Battery Percentage (%)' }},
+                                min: 0,
+                                max: 100,
+                            }}
+                        }},
+                        plugins: {{
+                            annotation: {{
+                                annotations: {{
+                                    reserveZone: {{
+                                        type: 'box',
+                                        yMin: 20,
+                                        yMax: 40,
+                                        backgroundColor: 'rgba(253, 126, 20, 0.15)',
+                                        borderColor: 'rgba(253, 126, 20, 0.5)',
+                                        borderWidth: 1,
+                                        label: {{
+                                            content: 'Reserve Zone',
+                                            display: true,
+                                            position: 'start'
+                                        }}
+                                    }},
+                                    deadZone: {{
+                                        type: 'box',
+                                        yMin: 0,
+                                        yMax: 20,
+                                        backgroundColor: 'rgba(0, 0, 0, 0.1)',
+                                        borderColor: 'black',
+                                        borderWidth: 1,
+                                        label: {{
+                                            content: 'CUTOFF / EMPTY',
+                                            display: true,
+                                            position: 'center'
+                                        }}
+                                    }}
+                                }}
                             }}
                         }}
                     }}
@@ -2268,7 +2312,7 @@ def home():
     
     html += """
         <div class="footer">
-            10kW Solar System • 30kWh Primary (18kWh usable) • 30kWh Backup (5yo, ~21kWh) • LiFePO4 Batteries • Managed by YourHost
+            10kW Solar System • 30kWh Primary • 21kWh Backup • LiFePO4 Batteries • Managed by YourHost
         </div>
     </div>
 </body>
