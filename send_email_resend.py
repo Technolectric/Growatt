@@ -589,14 +589,26 @@ def home():
     elif p_bat < 45 and tot_sol < tot_load:
         app_st, app_sub, app_col = "⚠️ REDUCE LOADS", "Primary Low & Discharging", "warning"
     
-    elif (p_bat > 75 and surplus_power > 3000) or (p_bat > 95 and not weather_bad):
-        reason = f"Surplus {surplus_power/1000:.1f}kW" if surplus_power > 3000 else "Battery Full & Sunny"
-        app_st, app_sub, app_col = "✅ OVEN/KETTLE SAFE", reason, "good"
+    # NEW: Battery is full (95%), ignore bad forecast
+    elif p_bat > 95:
+        app_st, app_sub, app_col = "🔋 BATTERY FULL", "System charged & ready", "good"
+
+    # NEW: Solar is decent and covering most of load (approx balanced)
+    elif tot_sol > 2000 and (tot_sol > tot_load * 0.9):
+        app_st, app_sub, app_col = "✅ SOLAR POWERING", "Solar supporting loads", "good"
+
+    # Existing Oven Safe logic (Strict Surplus)
+    elif (p_bat > 75 and surplus_power > 3000):
+        app_st, app_sub, app_col = "✅ OVEN/KETTLE SAFE", f"Surplus {surplus_power/1000:.1f}kW", "good"
     
-    elif weather_bad and p_bat > 80 and surplus_power > 0:
+    # Relaxed "Cook Now" - allow if battery is high, even if surplus is slightly negative
+    elif weather_bad and p_bat > 80:
         app_st, app_sub, app_col = "⚡ COOK NOW", "Bad forecast ahead. Use power now.", "good"
-    elif weather_bad:
+    
+    # Conserve - Only if battery is dropping and weather is bad
+    elif weather_bad and p_bat < 70:
         app_st, app_sub, app_col = "☁️ CONSERVE POWER", "Low Solar Forecast Expected", "warning"
+        
     elif surplus_power > 100:
         app_st, app_sub, app_col = "🔋 CHARGING", f"System recovering (+{surplus_power:.0f}W)", "normal"
     else:
@@ -608,9 +620,13 @@ def home():
     schedule_html = ""
     forecast_data = latest_data.get('solar_forecast', [])
     
-    # Override logic: If status is "COOK NOW" or "OVEN SAFE", ignore bad forecast warnings
-    if "COOK NOW" in app_st or "OVEN" in app_st:
-         schedule_html += '<li style="margin-bottom:10px; color:#28a745"><strong>⚡ Current Window:</strong><br>Battery is full. Safe to use heavy loads now.</li>'
+    # Override logic: If status is "COOK NOW", "OVEN SAFE", "BATTERY FULL", or "SOLAR POWERING"
+    # ignore bad forecast warnings in the Smart Schedule
+    safe_statuses = ["COOK NOW", "OVEN", "BATTERY FULL", "SOLAR POWERING"]
+    is_safe_now = any(s in app_st for s in safe_statuses)
+
+    if is_safe_now:
+         schedule_html += '<li style="margin-bottom:10px; color:#28a745"><strong>⚡ Current Window:</strong><br>Status is Good. Safe to use heavy loads now.</li>'
          
     elif forecast_data:
         best_start, best_end, current_run = None, None, 0
@@ -652,8 +668,6 @@ def home():
     else:
         # Dynamic downsampling
         total_points = len(load_history)
-        # Aim for roughly 150 points on the chart to keep it readable but detailed
-        # If we have few points (just started), step will be 1 (show all)
         step = max(1, total_points // 150)
         
         times = [t.strftime('%d %b %H:%M') for i, (t, p) in enumerate(load_history) if i % step == 0]
@@ -690,7 +704,7 @@ def home():
         .card {{ background: rgba(255,255,255,0.95); padding: 20px; border-radius: 15px; margin-bottom: 20px; box-shadow: 0 4px 15px rgba(0,0,0,0.2); backdrop-filter: blur(5px); }}
         .header {{ text-align: center; color: white; text-shadow: 2px 2px 4px rgba(0,0,0,0.7); margin-bottom: 25px; }}
         
-        /* Power Flow Animation CSS - ABSOLUTE POSITIONING FIX */
+        /* Power Flow Animation CSS - LAYERED FIX (No Gaps) */
         .flow-container {{ 
             position: relative; 
             height: 220px; 
@@ -699,9 +713,9 @@ def home():
             margin: 0 auto 20px auto;
         }}
 
-        /* Icons */
-        .f-icon {{ font-size: 2em; background: white; padding: 10px; border-radius: 50%; box-shadow: 0 4px 10px rgba(0,0,0,0.1); width: 45px; height: 45px; display:flex; align-items:center; justify-content:center; position:relative; z-index:10; }}
-        .hub-box {{ width: 50px; height: 50px; background: white; color: #333; border-radius: 10px; display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 1.5em; box-shadow: 0 4px 15px rgba(0,0,0,0.3); z-index:10; border: 2px solid #333; }}
+        /* Icons - Higher Z-Index to sit ON TOP of lines */
+        .f-icon {{ font-size: 2em; background: white; padding: 10px; border-radius: 50%; box-shadow: 0 4px 10px rgba(0,0,0,0.1); width: 45px; height: 45px; display:flex; align-items:center; justify-content:center; position:relative; z-index:2; }}
+        .hub-box {{ width: 50px; height: 50px; background: white; color: #333; border-radius: 10px; display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 1.5em; box-shadow: 0 4px 15px rgba(0,0,0,0.3); z-index:2; border: 2px solid #333; }}
         
         /* Positioning Icons */
         .pos-hub {{ position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); }}
@@ -710,11 +724,11 @@ def home():
         .pos-gen {{ position: absolute; top: 0px; left: 50%; transform: translateX(-50%); }}
         .pos-bat {{ position: absolute; bottom: 0px; left: 50%; transform: translateX(-50%); display:flex; flex-direction:column; align-items:center; }}
 
-        /* Connecting Lines (Absolute behind icons) */
-        .line-h-left {{ position: absolute; top: 50%; left: 60px; right: 55%; height: 4px; background: #ddd; transform: translateY(-50%); z-index: 1; }}
-        .line-h-right {{ position: absolute; top: 50%; left: 55%; right: 60px; height: 4px; background: #ddd; transform: translateY(-50%); z-index: 1; }}
-        .line-v-top {{ position: absolute; top: 55px; left: 50%; bottom: 55%; width: 4px; background: #ddd; transform: translateX(-50%); z-index: 1; }}
-        .line-v-bottom {{ position: absolute; top: 55%; left: 50%; bottom: 65px; width: 4px; background: #ddd; transform: translateX(-50%); z-index: 1; }}
+        /* Connecting Lines - Lower Z-Index to go UNDER icons. Full span to ensure connection */
+        .line-h-left {{ position: absolute; top: 50%; left: 0; right: 50%; height: 6px; background: #ddd; transform: translateY(-50%); z-index: 1; }}
+        .line-h-right {{ position: absolute; top: 50%; left: 50%; right: 0; height: 6px; background: #ddd; transform: translateY(-50%); z-index: 1; }}
+        .line-v-top {{ position: absolute; top: 0; left: 50%; bottom: 50%; width: 6px; background: #ddd; transform: translateX(-50%); z-index: 1; }}
+        .line-v-bottom {{ position: absolute; top: 50%; left: 50%; bottom: 0; width: 6px; background: #ddd; transform: translateX(-50%); z-index: 1; }}
         
         .f-dot {{ position: absolute; width: 10px; height: 10px; background: #28a745; border-radius: 50%; opacity: 0; }}
         
@@ -761,11 +775,11 @@ def home():
             <p>Solar Monitor • {latest_data.get('timestamp','Loading...')}</p>
         </div>
 
-        <!-- NEW: Animated HUB Diagram (Absolute Layout) -->
+        <!-- NEW: Animated HUB Diagram (Absolute Layout + Layering) -->
         <div class="card" style="background: rgba(255,255,255,0.9);">
             <div class="flow-container">
                 
-                <!-- Lines -->
+                <!-- Lines (Z-Index 1: Underlay) -->
                 <div class="line-v-top">
                     <div class="f-dot flow-down" style="animation-duration:{anim_g_h}; background:#dc3545; display:{'block' if gen_on else 'none'}"></div>
                 </div>
@@ -779,29 +793,30 @@ def home():
                      <div class="f-dot {bat_anim_class}" style="animation-duration:{bat_anim_speed}; background:{bat_dot_color}; display:{'none' if 'stopped' in bat_anim_class else 'block'}"></div>
                 </div>
 
-                <!-- Generator (Top) -->
+                <!-- Icons (Z-Index 2: Overlay) -->
+                <!-- Generator -->
                 <div class="pos-gen">
                     <div class="f-icon" style="border: 2px solid {'#dc3545' if gen_on else '#ccc'}">🔌</div>
                 </div>
 
-                <!-- Sun (Left) -->
+                <!-- Sun -->
                 <div class="pos-sun">
                     <div class="f-icon" style="color:#fd7e14">☀️</div>
                     <div style="font-weight:bold; font-size:0.8em; margin-top:5px;">{tot_sol:.0f}W</div>
                 </div>
                 
-                <!-- Hub (Center) -->
+                <!-- Hub -->
                 <div class="pos-hub">
                     <div class="hub-box">⚡</div>
                 </div>
 
-                <!-- House (Right) -->
+                <!-- House -->
                 <div class="pos-house">
                     <div class="f-icon">🏠</div>
                     <div style="font-weight:bold; font-size:0.8em; margin-top:5px;">{tot_load:.0f}W</div>
                 </div>
 
-                <!-- Battery (Bottom) -->
+                <!-- Battery -->
                 <div class="pos-bat">
                     <div class="f-icon" style="color:{bat_dot_color}">🔋</div>
                     <div style="font-weight:bold; font-size:0.8em; margin-top:5px;">{p_bat:.0f}%</div>
