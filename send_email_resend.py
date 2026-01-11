@@ -481,19 +481,13 @@ def poll_growatt():
             pred = calculate_battery_cascade(s_cast, l_cast, p_min, b_act)
 
             # --- POOL PUMP / CONTINUOUS LOAD ALERT ---
-            # Check if it's after 4 PM (16:00)
             if now.hour >= 16:
-                # If discharge is continuously > 1.1kW (1100W)
                 if tot_bat > 1100:
                     if pool_pump_start_time is None:
                         pool_pump_start_time = now
                     
-                    # Calculate duration
                     duration = now - pool_pump_start_time
-                    
-                    # If duration > 3 hours and time > 6 PM (18:00)
                     if duration > timedelta(hours=3) and now.hour >= 18:
-                        # Check cooldown (send max once per hour)
                         if pool_pump_last_alert is None or (now - pool_pump_last_alert) > timedelta(hours=1):
                             send_email(
                                 "⚠️ HIGH LOAD ALERT: Pool Pumps?", 
@@ -560,9 +554,10 @@ def home():
     elif p_bat < 45 and tot_sol < tot_load:
         app_st, app_sub, app_col = "⚠️ REDUCE LOADS", "Primary Low & Discharging", "warning"
     
-    # LOGIC: Oven Safe if Bat > 75% AND Surplus > 3kW
-    elif p_bat > 75 and surplus_power > 3000:
-        app_st, app_sub, app_col = "✅ OVEN/KETTLE SAFE", f"Bat > 75% & Surplus {surplus_power/1000:.1f}kW", "good"
+    # LOGIC: Oven Safe if (Bat > 75% AND Surplus > 3kW) OR (Bat > 95% AND Good Weather)
+    elif (p_bat > 75 and surplus_power > 3000) or (p_bat > 95 and not weather_bad):
+        reason = f"Surplus {surplus_power/1000:.1f}kW" if surplus_power > 3000 else "Battery Full & Sunny"
+        app_st, app_sub, app_col = "✅ OVEN/KETTLE SAFE", reason, "good"
     
     # LOGIC: Bad weather incoming + High Battery = Cook/Use Power Now
     elif weather_bad and p_bat > 80 and surplus_power > 0:
