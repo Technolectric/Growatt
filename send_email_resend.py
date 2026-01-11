@@ -662,6 +662,7 @@ def home():
     # Data Extraction
     primary_battery = latest_data.get("primary_battery_min", 0)
     backup_voltage = latest_data.get("backup_battery_voltage", 0)
+    backup_voltage_status = latest_data.get("backup_voltage_status", "Unknown") # FIXED: Added default extraction
     backup_active = latest_data.get("backup_active", False)
     generator_running = latest_data.get("generator_running", False)
     total_load = latest_data.get("total_output_power", 0)
@@ -738,6 +739,9 @@ def home():
         else:
             pred_message = "Battery Sufficient"
             pred_class = "good"
+    else:
+        pred_class = "good"
+        pred_message = "Initializing prediction..."
     
     # 6. Load Speedometer (Scaled to Alert Levels)
     # Scale bar to 5000W so alerts look impactful
@@ -851,7 +855,7 @@ def home():
             <div style="display:flex; justify-content:space-between; font-size:0.9em; color:#666;">
                 <span>0W</span>
                 <span style="font-weight:bold; color:{load_color}">{total_load:.0f}W • {load_msg}</span>
-                <span>4,500W+ (Critical)</span>
+                <span>5,000W+ (Critical)</span>
             </div>
         </div>
 
