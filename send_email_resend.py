@@ -704,7 +704,7 @@ def home():
         .card {{ background: rgba(255,255,255,0.95); padding: 20px; border-radius: 15px; margin-bottom: 20px; box-shadow: 0 4px 15px rgba(0,0,0,0.2); backdrop-filter: blur(5px); }}
         .header {{ text-align: center; color: white; text-shadow: 2px 2px 4px rgba(0,0,0,0.7); margin-bottom: 25px; }}
         
-        /* Power Flow Animation CSS - LAYERED FIX (No Gaps) */
+        /* Power Flow Animation CSS - ABSOLUTE POSITIONING FIX + Z-INDEX LAYER FIX */
         .flow-container {{ 
             position: relative; 
             height: 220px; 
@@ -713,22 +713,92 @@ def home():
             margin: 0 auto 20px auto;
         }}
 
-        /* Icons - Higher Z-Index to sit ON TOP of lines */
-        .f-icon {{ font-size: 2em; background: white; padding: 10px; border-radius: 50%; box-shadow: 0 4px 10px rgba(0,0,0,0.1); width: 45px; height: 45px; display:flex; align-items:center; justify-content:center; position:relative; z-index:2; }}
-        .hub-box {{ width: 50px; height: 50px; background: white; color: #333; border-radius: 10px; display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 1.5em; box-shadow: 0 4px 15px rgba(0,0,0,0.3); z-index:2; border: 2px solid #333; }}
+        /* Icons - Higher Z-Index (2) to sit ON TOP of lines (1) */
+        .f-icon {{ 
+            font-size: 2em; 
+            background: white; 
+            padding: 10px; 
+            border-radius: 50%; 
+            box-shadow: 0 4px 10px rgba(0,0,0,0.1); 
+            width: 45px; 
+            height: 45px; 
+            display:flex; 
+            align-items:center; 
+            justify-content:center; 
+            position: relative; /* CRITICAL: Enables z-index */
+            z-index: 2; 
+        }}
+        
+        .hub-box {{ 
+            width: 50px; 
+            height: 50px; 
+            background: white; 
+            color: #333; 
+            border-radius: 10px; 
+            display: flex; 
+            align-items: center; 
+            justify-content: center; 
+            font-weight: bold; 
+            font-size: 1.5em; 
+            box-shadow: 0 4px 15px rgba(0,0,0,0.3); 
+            border: 2px solid #333;
+            position: relative; /* CRITICAL: Enables z-index */
+            z-index: 2;
+        }}
         
         /* Positioning Icons */
-        .pos-hub {{ position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); }}
-        .pos-sun {{ position: absolute; top: 50%; left: 0px; transform: translateY(-50%); display:flex; flex-direction:column; align-items:center; }}
-        .pos-house {{ position: absolute; top: 50%; right: 0px; transform: translateY(-50%); display:flex; flex-direction:column; align-items:center; }}
-        .pos-gen {{ position: absolute; top: 0px; left: 50%; transform: translateX(-50%); }}
-        .pos-bat {{ position: absolute; bottom: 0px; left: 50%; transform: translateX(-50%); display:flex; flex-direction:column; align-items:center; }}
+        .pos-hub {{ position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); z-index: 2; }}
+        .pos-sun {{ position: absolute; top: 50%; left: 0px; transform: translateY(-50%); display:flex; flex-direction:column; align-items:center; z-index: 2; }}
+        .pos-house {{ position: absolute; top: 50%; right: 0px; transform: translateY(-50%); display:flex; flex-direction:column; align-items:center; z-index: 2; }}
+        .pos-gen {{ position: absolute; top: 0px; left: 50%; transform: translateX(-50%); z-index: 2; }}
+        .pos-bat {{ position: absolute; bottom: 0px; left: 50%; transform: translateX(-50%); display:flex; flex-direction:column; align-items:center; z-index: 2; }}
 
-        /* Connecting Lines - Lower Z-Index to go UNDER icons. Full span to ensure connection */
-        .line-h-left {{ position: absolute; top: 50%; left: 0; right: 50%; height: 6px; background: #ddd; transform: translateY(-50%); z-index: 1; }}
-        .line-h-right {{ position: absolute; top: 50%; left: 50%; right: 0; height: 6px; background: #ddd; transform: translateY(-50%); z-index: 1; }}
-        .line-v-top {{ position: absolute; top: 0; left: 50%; bottom: 50%; width: 6px; background: #ddd; transform: translateX(-50%); z-index: 1; }}
-        .line-v-bottom {{ position: absolute; top: 50%; left: 50%; bottom: 0; width: 6px; background: #ddd; transform: translateX(-50%); z-index: 1; }}
+        /* Connecting Lines - Lower Z-Index (1) to go UNDER icons. Used Calc for precision gaps */
+        /* Center is 50%. Hub box is ~50px wide/high (25px radius). Stop at 30px from center. */
+        
+        .line-h-left {{ 
+            position: absolute; 
+            top: 50%; 
+            left: 0; 
+            width: calc(50% - 30px); 
+            height: 6px; 
+            background: #ddd; 
+            transform: translateY(-50%); 
+            z-index: 1; 
+        }}
+        
+        .line-h-right {{ 
+            position: absolute; 
+            top: 50%; 
+            left: calc(50% + 30px); 
+            right: 0; 
+            height: 6px; 
+            background: #ddd; 
+            transform: translateY(-50%); 
+            z-index: 1; 
+        }}
+        
+        .line-v-top {{ 
+            position: absolute; 
+            top: 0; 
+            left: 50%; 
+            height: calc(50% - 30px); 
+            width: 6px; 
+            background: #ddd; 
+            transform: translateX(-50%); 
+            z-index: 1; 
+        }}
+        
+        .line-v-bottom {{ 
+            position: absolute; 
+            top: calc(50% + 30px); 
+            left: 50%; 
+            bottom: 0; 
+            width: 6px; 
+            background: #ddd; 
+            transform: translateX(-50%); 
+            z-index: 1; 
+        }}
         
         .f-dot {{ position: absolute; width: 10px; height: 10px; background: #28a745; border-radius: 50%; opacity: 0; }}
         
