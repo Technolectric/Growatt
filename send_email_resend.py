@@ -862,78 +862,114 @@ def home():
         /* Power flow visualization */
         .power-flow {
             position: relative;
-            height: 300px;
+            height: 400px;
             display: flex;
             align-items: center;
             justify-content: center;
             margin: 2rem 0;
         }
         
+        .flow-svg {
+            pointer-events: none;
+        }
+        
+        .connection-line {
+            transition: stroke 0.3s ease;
+        }
+        
+        .flow-dot {
+            filter: drop-shadow(0 0 8px currentColor);
+        }
+        
         .flow-node {
             position: absolute;
-            width: 80px;
-            height: 80px;
+            width: 90px;
+            height: 90px;
             border-radius: 50%;
             display: flex;
             flex-direction: column;
             align-items: center;
             justify-content: center;
             background: var(--bg-secondary);
-            border: 2px solid var(--border-color);
+            border: 3px solid var(--border-color);
             transition: all 0.3s ease;
-            z-index: 2;
+            z-index: 10;
+            cursor: pointer;
         }
         
         .flow-node:hover {
-            transform: scale(1.1);
-            box-shadow: 0 0 30px rgba(0, 255, 136, 0.4);
+            transform: scale(1.15) !important;
+            box-shadow: 0 0 30px rgba(0, 255, 136, 0.5);
+            z-index: 20;
         }
         
         .flow-node.active {
             border-color: var(--accent-primary);
-            box-shadow: 0 0 20px rgba(0, 255, 136, 0.4);
+            box-shadow: 0 0 20px rgba(0, 255, 136, 0.3);
+            animation: pulse-node 2s ease-in-out infinite;
+        }
+        
+        .flow-node.inverter {
+            width: 110px;
+            height: 110px;
+            background: linear-gradient(135deg, var(--bg-secondary), var(--bg-card));
+            border-width: 4px;
+            border-color: var(--accent-secondary);
+            box-shadow: 0 0 30px rgba(0, 204, 255, 0.4);
+        }
+        
+        .flow-node.generator.active {
+            border-color: var(--accent-critical);
+            box-shadow: 0 0 20px rgba(255, 51, 102, 0.4);
+            animation: pulse-critical 1s ease-in-out infinite;
+        }
+        
+        @keyframes pulse-node {
+            0%, 100% { 
+                box-shadow: 0 0 20px rgba(0, 255, 136, 0.3);
+            }
+            50% { 
+                box-shadow: 0 0 35px rgba(0, 255, 136, 0.6);
+            }
+        }
+        
+        @keyframes pulse-critical {
+            0%, 100% { 
+                box-shadow: 0 0 20px rgba(255, 51, 102, 0.4);
+            }
+            50% { 
+                box-shadow: 0 0 40px rgba(255, 51, 102, 0.8);
+            }
         }
         
         .flow-icon {
             font-size: 2rem;
+            margin-bottom: 0.25rem;
+        }
+        
+        .flow-node.inverter .flow-icon {
+            font-size: 2.5rem;
+        }
+        
+        .flow-label {
+            font-size: 0.7rem;
+            font-weight: 600;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-bottom: 0.15rem;
         }
         
         .flow-value {
             font-size: 0.75rem;
             font-family: 'JetBrains Mono', monospace;
-            font-weight: 600;
-            margin-top: 0.25rem;
+            font-weight: 700;
+            color: var(--accent-primary);
         }
         
-        .flow-node.solar { top: 50%; left: 10%; transform: translate(-50%, -50%); }
-        .flow-node.battery { bottom: 10%; left: 50%; transform: translateX(-50%); }
-        .flow-node.load { top: 50%; right: 10%; transform: translate(50%, -50%); }
-        .flow-node.grid { top: 10%; left: 50%; transform: translateX(-50%); }
-        
-        .flow-line {
-            position: absolute;
-            background: var(--border-color);
-            z-index: 1;
-            transition: all 0.3s ease;
-        }
-        
-        .flow-line.active {
-            background: var(--accent-primary);
-            box-shadow: 0 0 10px rgba(0, 255, 136, 0.5);
-        }
-        
-        .flow-line.horizontal {
-            height: 3px;
-            top: 50%;
-            left: calc(10% + 40px);
-            right: calc(10% + 40px);
-        }
-        
-        .flow-line.vertical {
-            width: 3px;
-            left: 50%;
-            top: calc(10% + 40px);
-            bottom: calc(10% + 40px);
+        .flow-node.generator.active .flow-value,
+        .flow-node.generator.active .flow-label {
+            color: var(--accent-critical);
         }
         
         /* Battery visualization */
@@ -1202,27 +1238,111 @@ def home():
         <div class="card">
             <h2>Real-time Energy Flow</h2>
             <div class="power-flow">
-                <div class="flow-line horizontal {{ 'active' if solar_active else '' }}"></div>
-                <div class="flow-line vertical {{ 'active' if battery_active else '' }}"></div>
+                <!-- Connecting Lines (behind nodes) -->
+                <svg class="flow-svg" viewBox="0 0 600 400" style="position: absolute; width: 100%; height: 100%; top: 0; left: 0;">
+                    <defs>
+                        <!-- Gradient for active flows -->
+                        <linearGradient id="flowGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+                            <stop offset="0%" style="stop-color:#00ff88;stop-opacity:0" />
+                            <stop offset="50%" style="stop-color:#00ff88;stop-opacity:1" />
+                            <stop offset="100%" style="stop-color:#00ff88;stop-opacity:0" />
+                        </linearGradient>
+                        
+                        <linearGradient id="dischargeGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+                            <stop offset="0%" style="stop-color:#ff3366;stop-opacity:0" />
+                            <stop offset="50%" style="stop-color:#ff3366;stop-opacity:1" />
+                            <stop offset="100%" style="stop-color:#ff3366;stop-opacity:0" />
+                        </linearGradient>
+                    </defs>
+                    
+                    <!-- Solar to Inverter line -->
+                    <line x1="100" y1="200" x2="250" y2="200" 
+                          stroke="{{ '#00ff88' if solar_active else 'rgba(255,255,255,0.1)' }}" 
+                          stroke-width="3" class="connection-line"/>
+                    {% if solar_active %}
+                    <circle r="6" fill="#00ff88" class="flow-dot">
+                        <animateMotion dur="2s" repeatCount="indefinite" path="M100,200 L250,200" />
+                    </circle>
+                    <circle r="6" fill="#00ff88" class="flow-dot">
+                        <animateMotion dur="2s" repeatCount="indefinite" begin="0.5s" path="M100,200 L250,200" />
+                    </circle>
+                    {% endif %}
+                    
+                    <!-- Inverter to Load line -->
+                    <line x1="350" y1="200" x2="500" y2="200" 
+                          stroke="{{ '#00ccff' if load_value > 0 else 'rgba(255,255,255,0.1)' }}" 
+                          stroke-width="3" class="connection-line"/>
+                    {% if load_value > 0 %}
+                    <circle r="6" fill="#00ccff" class="flow-dot">
+                        <animateMotion dur="1.5s" repeatCount="indefinite" path="M350,200 L500,200" />
+                    </circle>
+                    <circle r="6" fill="#00ccff" class="flow-dot">
+                        <animateMotion dur="1.5s" repeatCount="indefinite" begin="0.4s" path="M350,200 L500,200" />
+                    </circle>
+                    {% endif %}
+                    
+                    <!-- Battery to Inverter line (bidirectional) -->
+                    <line x1="300" y1="250" x2="300" y2="320" 
+                          stroke="{{ '#00ff88' if battery_charging else ('#ff3366' if battery_discharging else 'rgba(255,255,255,0.1)') }}" 
+                          stroke-width="3" class="connection-line"/>
+                    {% if battery_charging %}
+                    <!-- Charging: flow DOWN from inverter to battery -->
+                    <circle r="6" fill="#00ff88" class="flow-dot">
+                        <animateMotion dur="2s" repeatCount="indefinite" path="M300,250 L300,320" />
+                    </circle>
+                    {% elif battery_discharging %}
+                    <!-- Discharging: flow UP from battery to inverter -->
+                    <circle r="6" fill="#ff3366" class="flow-dot">
+                        <animateMotion dur="2s" repeatCount="indefinite" path="M300,320 L300,250" />
+                    </circle>
+                    <circle r="6" fill="#ff3366" class="flow-dot">
+                        <animateMotion dur="2s" repeatCount="indefinite" begin="0.6s" path="M300,320 L300,250" />
+                    </circle>
+                    {% endif %}
+                    
+                    <!-- Generator to Inverter line -->
+                    <line x1="300" y1="80" x2="300" y2="150" 
+                          stroke="{{ '#ff3366' if generator_on else 'rgba(255,255,255,0.1)' }}" 
+                          stroke-width="3" class="connection-line"/>
+                    {% if generator_on %}
+                    <circle r="6" fill="#ff3366" class="flow-dot">
+                        <animateMotion dur="1.5s" repeatCount="indefinite" path="M300,80 L300,150" />
+                    </circle>
+                    <circle r="6" fill="#ff3366" class="flow-dot">
+                        <animateMotion dur="1.5s" repeatCount="indefinite" begin="0.3s" path="M300,80 L300,150" />
+                    </circle>
+                    {% endif %}
+                </svg>
                 
-                <div class="flow-node solar {{ 'active' if solar_active else '' }}">
+                <!-- Nodes (on top of lines) -->
+                <div class="flow-node solar {{ 'active' if solar_active else '' }}" style="left: 50px; top: 50%; transform: translateY(-50%);">
                     <div class="flow-icon">☀️</div>
+                    <div class="flow-label">Solar</div>
                     <div class="flow-value">{{ solar_value }}W</div>
                 </div>
                 
-                <div class="flow-node battery {{ 'active' if battery_active else '' }}">
-                    <div class="flow-icon">🔋</div>
-                    <div class="flow-value">{{ primary_pct }}%</div>
+                <div class="flow-node inverter active" style="left: 50%; top: 50%; transform: translate(-50%, -50%);">
+                    <div class="flow-icon">⚡</div>
+                    <div class="flow-label">Inverter</div>
+                    <div class="flow-value">{{ inverter_temp }}°C</div>
                 </div>
                 
-                <div class="flow-node load active">
+                <div class="flow-node load active" style="right: 50px; top: 50%; transform: translateY(-50%);">
                     <div class="flow-icon">🏠</div>
+                    <div class="flow-label">Load</div>
                     <div class="flow-value">{{ load_value }}W</div>
                 </div>
                 
-                <div class="flow-node grid {{ 'active' if generator_on else '' }}">
-                    <div class="flow-icon">{{ '🔌' if generator_on else '⚡' }}</div>
-                    <div class="flow-value">{{ 'GEN' if generator_on else 'GRID' }}</div>
+                <div class="flow-node battery {{ 'active' if battery_charging or battery_discharging else '' }}" style="left: 50%; bottom: 30px; transform: translateX(-50%);">
+                    <div class="flow-icon">🔋</div>
+                    <div class="flow-label">Battery</div>
+                    <div class="flow-value">{{ primary_pct }}%</div>
+                </div>
+                
+                <div class="flow-node generator {{ 'active' if generator_on else '' }}" style="left: 50%; top: 30px; transform: translateX(-50%);">
+                    <div class="flow-icon">{{ '⚠️' if generator_on else '🔌' }}</div>
+                    <div class="flow-label">Generator</div>
+                    <div class="flow-value">{{ 'ON' if generator_on else 'OFF' }}</div>
                 </div>
             </div>
         </div>
@@ -1587,6 +1707,12 @@ def home():
     # Power flow states
     solar_active = tot_sol > 100
     battery_active = tot_dis > 100 or surplus_power > 100
+    battery_charging = surplus_power > 100
+    battery_discharging = tot_dis > 100
+    
+    # Get average inverter temperature
+    inverter_temps = [inv.get('temperature', 0) for inv in latest_data.get('inverters', [])]
+    inverter_temp = f"{(sum(inverter_temps) / len(inverter_temps)):.0f}" if inverter_temps else "0"
     
     # Prepare alerts
     alerts = [{"time": a['timestamp'].strftime("%H:%M"), "subject": a['subject'], "type": a['type']} 
@@ -1618,7 +1744,10 @@ def home():
         backup_pct=f"{b_pct:.0f}",
         solar_active=solar_active,
         battery_active=battery_active,
+        battery_charging=battery_charging,
+        battery_discharging=battery_discharging,
         generator_on=gen_on,
+        inverter_temp=inverter_temp,
         forecast_times=forecast_times,
         forecast_solar=forecast_solar,
         forecast_load=forecast_load,
