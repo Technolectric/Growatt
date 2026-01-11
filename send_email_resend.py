@@ -747,11 +747,8 @@ def update_load_pattern(current_load):
 # ----------------------------
 # Email function with alert history tracking
 # ----------------------------
-def send_email(subject, html_content, alert_type="general"):
+def send_email(subject, html_content, alert_type="general", send_via_email=True):
     global last_alert_time, alert_history
-    if not all([RESEND_API_KEY, SENDER_EMAIL, RECIPIENT_EMAIL]):
-        print("✗ Error: Missing email credentials in env")
-        return False
     
     # Increased cooldowns to reduce email frequency
     cooldown_map = {
@@ -775,45 +772,58 @@ def send_email(subject, html_content, alert_type="general"):
             print(f"⚠️ Alert cooldown active for {alert_type} ({cooldown_minutes} min)")
             return False
     
-    email_data = {
-        "from": SENDER_EMAIL,
-        "to": [RECIPIENT_EMAIL],
-        "subject": subject,
-        "html": html_content
-    }
+    # Logic to determine if we treat this as a "success" (for dashboard) 
+    # based on whether we actually try to send an email or just log it.
+    action_successful = False
     
-    try:
-        response = requests.post(
-            "https://api.resend.com/emails",
-            headers={
-                "Authorization": f"Bearer {RESEND_API_KEY}",
-                "Content-Type": "application/json"
-            },
-            json=email_data
-        )
-        if response.status_code == 200:
-            now = datetime.now(EAT)
-            print(f"✓ Email sent: {subject}")
-            last_alert_time[alert_type] = now
-            
-            # Add to alert history
-            alert_history.append({
-                "timestamp": now,
-                "type": alert_type,
-                "subject": subject
-            })
-            
-            # Keep only last 12 hours
-            cutoff = now - timedelta(hours=12)
-            alert_history[:] = [a for a in alert_history if a['timestamp'] >= cutoff]
-            
-            return True
-        else:
-            print(f"✗ Email failed {response.status_code}: {response.text}")
-            return False
-    except Exception as e:
-        print(f"✗ Error sending email: {e}")
-        return False
+    if send_via_email and all([RESEND_API_KEY, SENDER_EMAIL, RECIPIENT_EMAIL]):
+        try:
+            email_data = {
+                "from": SENDER_EMAIL,
+                "to": [RECIPIENT_EMAIL],
+                "subject": subject,
+                "html": html_content
+            }
+            response = requests.post(
+                "https://api.resend.com/emails",
+                headers={
+                    "Authorization": f"Bearer {RESEND_API_KEY}",
+                    "Content-Type": "application/json"
+                },
+                json=email_data
+            )
+            if response.status_code == 200:
+                print(f"✓ Email sent: {subject}")
+                action_successful = True
+            else:
+                print(f"✗ Email failed {response.status_code}: {response.text}")
+                action_successful = False
+        except Exception as e:
+            print(f"✗ Error sending email: {e}")
+            action_successful = False
+    else:
+        # Dashboard-only mode (or missing creds) - Log it as successful so it appears on dashboard
+        print(f"ℹ️ Alert logged to Dashboard (Email skipped): {subject}")
+        action_successful = True
+
+    if action_successful:
+        now = datetime.now(EAT)
+        last_alert_time[alert_type] = now
+        
+        # Add to alert history
+        alert_history.append({
+            "timestamp": now,
+            "type": alert_type,
+            "subject": subject
+        })
+        
+        # Keep only last 12 hours
+        cutoff = now - timedelta(hours=12)
+        alert_history[:] = [a for a in alert_history if a['timestamp'] >= cutoff]
+        
+        return True
+    
+    return False
 
 # ----------------------------
 # Intelligent Alert Logic
@@ -992,7 +1002,8 @@ def check_and_send_alerts(inverter_data, solar_conditions, total_solar_input, to
                 {f'<p style="color: #dc3545;"><strong>Weather:</strong> Poor solar forecast. Consider reducing loads.</p>' if solar_conditions and solar_conditions['poor_conditions'] else ''}
             </div>
             """,
-            alert_type="warning"
+            alert_type="warning",
+            send_via_email=backup_active  # Email only if backup is active
         )
     
     # ============================================
@@ -1027,7 +1038,8 @@ def check_and_send_alerts(inverter_data, solar_conditions, total_solar_input, to
                 {f'<p style="color: #dc3545;"><strong>Weather:</strong> Poor solar conditions (Cloud: {solar_conditions["avg_cloud_cover"]:.0f}%). Battery recovery will be limited.</p>' if solar_conditions and solar_conditions['poor_conditions'] else ''}
             </div>
             """,
-            alert_type="very_high_load"
+            alert_type="very_high_load",
+            send_via_email=backup_active  # Email only if backup is active
         )
     
     # TIER 2: High Battery Discharge (2500-3500W)
@@ -1051,7 +1063,8 @@ def check_and_send_alerts(inverter_data, solar_conditions, total_solar_input, to
                 {f'<p style="color: #dc3545;"><strong>Weather:</strong> Poor solar ahead. Consider reducing usage.</p>' if solar_conditions and solar_conditions['poor_conditions'] else ''}
             </div>
             """,
-            alert_type="high_load"
+            alert_type="high_load",
+            send_via_email=backup_active  # Email only if backup is active
         )
     
     # TIER 1: Moderate Battery Discharge (1500-2000W) with Low Battery
@@ -1072,7 +1085,8 @@ def check_and_send_alerts(inverter_data, solar_conditions, total_solar_input, to
                 <p><strong>Advisory:</strong> Consider conserving energy.</p>
             </div>
             """,
-            alert_type="moderate_load"
+            alert_type="moderate_load",
+            send_via_email=backup_active  # Email only if backup is active
         )
 
 # ----------------------------
