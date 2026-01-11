@@ -66,7 +66,6 @@ RECIPIENT_EMAIL = os.getenv('RECIPIENT_EMAIL')
 # ----------------------------
 headers = {"token": TOKEN, "Content-Type": "application/x-www-form-urlencoded"}
 last_alert_time = {}
-# Initialize latest_data with default structure to prevent template errors
 latest_data = {
     "timestamp": "Initializing...",
     "total_output_power": 0,
@@ -93,11 +92,9 @@ solar_conditions_cache = None
 alert_history = []
 last_communication = {}
 
-# Pool Pump / High Load Tracking
 pool_pump_start_time = None
 pool_pump_last_alert = None
 
-# Historical Data & Forecast Containers
 solar_forecast = []
 solar_generation_pattern = deque(maxlen=5000)
 load_demand_pattern = deque(maxlen=5000)
@@ -208,9 +205,7 @@ def analyze_solar_conditions(forecast):
     except: pass
     return None
 
-# ----------------------------
-# Helper & Forecasting
-# ----------------------------
+# Helper Functions
 def get_backup_voltage_status(voltage):
     if voltage >= BACKUP_VOLTAGE_GOOD: return "Good", "green"
     elif voltage >= BACKUP_VOLTAGE_MEDIUM: return "Medium", "orange"
@@ -292,35 +287,24 @@ def generate_load_forecast(pattern, current_avg=0):
     for i in range(FORECAST_HOURS):
         ft = now + timedelta(hours=i)
         h = ft.hour
-        
-        # First set base using time-based defaults
-        if 0 <= h < 5: base = 600
-        elif 5 <= h < 8: base = 1800
-        elif 8 <= h < 17: base = 1200
-        elif 17 <= h < 22: base = 2800
-        else: base = 600  # For 22-23 (10pm-11pm) and any other hour
-        
-        # Then override with pattern if available
+        base = 1000
         if pattern:
             match = next((l for ph, _, l in pattern if ph == h), None)
             if match is not None: base = match
+        else:
+            if 0 <= h < 5: base = 600
+            elif 5 <= h < 8: base = 1800
+            elif 8 <= h < 17: base = 1200
+            elif 17 <= h < 22: base = 2800
         
-        # Adjust based on current average
         is_spike = current_avg > (base * 1.5)
         if current_avg > 0:
-            if i == 0: 
-                val = (current_avg * 0.8) + (base * 0.2)
-            elif i == 1: 
-                val = (current_avg * 0.3) + (base * 0.7) if is_spike else (current_avg * 0.5) + (base * 0.5)
-            elif i == 2: 
-                val = base if is_spike else (current_avg * 0.2) + (base * 0.8)
-            else: 
-                val = base
-        else: 
-            val = base
-            
+            if i == 0: val = (current_avg * 0.8) + (base * 0.2)
+            elif i == 1: val = (current_avg * 0.3) + (base * 0.7) if is_spike else (current_avg * 0.5) + (base * 0.5)
+            elif i == 2: val = base if is_spike else (current_avg * 0.2) + (base * 0.8)
+            else: val = base
+        else: val = base
         forecast.append({'time': ft, 'hour': h, 'estimated_load': val})
-    
     return forecast
 
 def calculate_battery_cascade(solar, load, p_pct, b_active=False):
@@ -363,9 +347,6 @@ def calculate_battery_cascade(solar, load, p_pct, b_active=False):
     
     return {'trace_total_pct': trace, 'generator_needed': gen_needed, 'time_empty': empty_time, 'switchover_occurred': switch_occurred, 'genset_hours': acc_gen_wh/5000}
 
-# ----------------------------
-# Updates & Email
-# ----------------------------
 def update_patterns(solar, load):
     now = datetime.now(EAT)
     h = now.hour
@@ -583,23 +564,23 @@ def api_data():
 # ----------------------------
 @app.route("/")
 def home():
-    # Prepare all data
-    def _num(val, default=0.0):
+    def _num(val):
+        """Safe number conversion"""
         try:
-            return float(val)
-        except (TypeError, ValueError):
-            return default
-
-    # Use latest_data which is now initialized with defaults
+            return float(val) if val is not None else 0
+        except (ValueError, TypeError):
+            return 0
+    
+    # Extract data safely
     p_bat = _num(latest_data.get("primary_battery_min", 0))
     b_volt = _num(latest_data.get("backup_battery_voltage", 0))
     b_stat = latest_data.get("backup_voltage_status", "Unknown")
-    b_active = bool(latest_data.get("backup_active", False))
-    gen_on = bool(latest_data.get("generator_running", False))
+    b_active = latest_data.get("backup_active", False)
+    gen_on = latest_data.get("generator_running", False)
     tot_load = _num(latest_data.get("total_output_power", 0))
     tot_sol = _num(latest_data.get("total_solar_input_W", 0))
     tot_dis = _num(latest_data.get("total_battery_discharge_W", 0))
-
+    
     p_kwh = (p_bat / 100.0) * 30.0
     b_pct = _num(latest_data.get("backup_percent_calc", 0))
     b_kwh = _num(latest_data.get("backup_kwh_calc", 0))
@@ -610,62 +591,64 @@ def home():
 
     # Status determination
     if gen_on:
-        app_st, app_sub, app_col = "CRITICAL: GENERATOR ON", "Stop all non-essential loads immediately", "critical"
+        app_st, app_sub, app_col = "⚠️ GENERATOR RUNNING", "Stop all heavy loads immediately", "critical"
+        status_icon = "🚨"
     elif b_active:
-        app_st, app_sub, app_col = "BACKUP ACTIVE", "Primary depleted - minimize loads", "critical"
+        app_st, app_sub, app_col = "⚠️ BACKUP ACTIVE", "Primary depleted - conserve power", "critical"
+        status_icon = "⚠️"
     elif p_bat < 45 and tot_sol < tot_load:
-        app_st, app_sub, app_col = "REDUCE LOADS", "Primary battery low & discharging", "warning"
+        app_st, app_sub, app_col = "⚠️ REDUCE LOADS", "Battery low & discharging", "warning"
+        status_icon = "⚠️"
     elif p_bat > 95:
-        app_st, app_sub, app_col = "BATTERY FULL", "System fully charged", "good"
+        app_st, app_sub, app_col = "✅ BATTERY FULL", "System fully charged", "good"
+        status_icon = "🔋"
     elif tot_sol > 2000 and (tot_sol > tot_load * 0.9):
-        app_st, app_sub, app_col = "SOLAR POWERING", "Solar covering most loads", "good"
+        app_st, app_sub, app_col = "✅ SOLAR POWERING", "Solar covering loads", "good"
+        status_icon = "☀️"
     elif (p_bat > 75 and surplus_power > 3000):
-        app_st, app_sub, app_col = "HIGH SURPLUS", f"Safe to use heavy appliances", "good"
+        app_st, app_sub, app_col = "✅ HIGH SURPLUS", f"Heavy loads safe", "good"
+        status_icon = "⚡"
     elif weather_bad and p_bat > 80:
-        app_st, app_sub, app_col = "USE POWER NOW", "Poor forecast ahead - cook while you can", "good"
+        app_st, app_sub, app_col = "⚡ USE POWER NOW", "Poor forecast - cook now", "good"
+        status_icon = "⚡"
     elif weather_bad and p_bat < 70:
-        app_st, app_sub, app_col = "CONSERVE POWER", "Low solar forecast expected", "warning"
+        app_st, app_sub, app_col = "☁️ CONSERVE POWER", "Low solar expected", "warning"
+        status_icon = "☁️"
     elif surplus_power > 100:
-        app_st, app_sub, app_col = "CHARGING", f"Battery recovering", "normal"
+        app_st, app_sub, app_col = "🔋 CHARGING", f"System recovering", "normal"
+        status_icon = "🔋"
     else:
-        app_st, app_sub, app_col = "NORMAL OPERATION", "System running within parameters", "normal"
+        app_st, app_sub, app_col = "ℹ️ NORMAL", "System running", "normal"
+        status_icon = "ℹ️"
     
-    # Chart data - handle empty history
+    # Chart data
     if not load_history:
         times = [datetime.now(EAT).strftime('%d %b %H:%M')]
         l_vals = [tot_load]
         b_vals = [tot_dis]
-        s_vals = [tot_sol]
     else:
         total_points = len(load_history)
         step = max(1, total_points // 150)
-        
         times = [t.strftime('%d %b %H:%M') for i, (t, p) in enumerate(load_history) if i % step == 0]
         l_vals = [p for i, (t, p) in enumerate(load_history) if i % step == 0]
         b_vals = [p for i, (t, p) in enumerate(battery_history) if i % step == 0]
-        
-        # Add solar data if available
-        s_vals = [0] * len(times)  # Placeholder for now
     
     pred = latest_data.get("battery_life_prediction")
     sim_t = ["Now"] + [d['time'].strftime('%H:%M') for d in latest_data.get("solar_forecast", [])]
     trace_pct = pred.get('trace_total_pct', []) if pred else []
     
-    # Solar forecast for next 12h
     s_forecast = latest_data.get("solar_forecast", [])
     l_forecast = latest_data.get("load_forecast", [])
     
-    forecast_times = []
-    forecast_solar = []
-    forecast_load = []
-    
     if s_forecast and l_forecast:
-        forecast_times = [d['time'].strftime('%H:%M') for d in s_forecast[:12]]  # Limit to 12 hours
+        forecast_times = [d['time'].strftime('%H:%M') for d in s_forecast[:12]]
         forecast_solar = [d['estimated_generation'] for d in s_forecast[:12]]
         forecast_load = [d['estimated_load'] for d in l_forecast[:12]]
     else:
-        # Generate placeholder forecast data
         now = datetime.now(EAT)
+        forecast_times = []
+        forecast_solar = []
+        forecast_load = []
         for i in range(12):
             hour = (now.hour + i) % 24
             forecast_times.append((now + timedelta(hours=i)).strftime('%H:%M'))
@@ -673,7 +656,151 @@ def home():
                 forecast_solar.append(3000 - abs(12 - hour) * 200)
             else:
                 forecast_solar.append(0)
-            forecast_load.append(1200)  # Default load
+            forecast_load.append(1200)
+
+    # Power flow states
+    solar_active = tot_sol > 100
+    battery_charging = surplus_power > 100
+    battery_discharging = tot_dis > 100
+    
+    # Inverter temperature
+    inverter_temps = [inv.get('temperature', 0) for inv in latest_data.get('inverters', [])]
+    inverter_temp = f"{(sum(inverter_temps) / len(inverter_temps)):.0f}" if inverter_temps else "0"
+    
+    # Trends
+    load_trend_icon = "↑" if tot_load > 2000 else "→" if tot_load > 1000 else "↓"
+    load_trend_text = "High" if tot_load > 2000 else "Moderate" if tot_load > 1000 else "Low"
+    load_trend_class = "trend-up" if tot_load > 2000 else "trend-down" if tot_load < 1000 else ""
+    
+    solar_trend_icon = "☀️" if tot_sol > 5000 else "⛅" if tot_sol > 2000 else "☁️"
+    solar_trend_text = "Excellent" if tot_sol > 5000 else "Good" if tot_sol > 2000 else "Low"
+    solar_trend_class = "trend-up" if tot_sol > 2000 else "trend-down"
+    
+    primary_color = "text-success" if p_bat > 60 else "text-warning" if p_bat > 40 else "text-danger"
+    backup_color = "text-success" if b_volt > 52.3 else "text-warning" if b_volt > 51.5 else "text-danger"
+    
+    primary_battery_class = "" if p_bat > 60 else "warning" if p_bat > 40 else "critical"
+    backup_battery_class = "" if b_pct > 60 else "warning" if b_pct > 40 else "critical"
+    
+    alerts = [{"time": a['timestamp'].strftime("%H:%M"), "subject": a['subject'], "type": a['type']} 
+              for a in reversed(alert_history[-10:])]
+    
+    # Smart Recommendations
+    recommendation_items = []
+    
+    safe_statuses = ["USE POWER NOW", "HIGH SURPLUS", "BATTERY FULL", "SOLAR POWERING"]
+    is_safe_now = any(s in app_st for s in safe_statuses)
+    
+    if gen_on:
+        recommendation_items.append({
+            'icon': '🚨',
+            'title': 'NO HEAVY LOADS',
+            'description': 'Generator running - turn off all non-essential appliances',
+            'appliances': [
+                {'name': 'Oven', 'status': '❌', 'class': 'danger'},
+                {'name': 'Kettle', 'status': '❌', 'class': 'danger'},
+                {'name': 'Washing Machine', 'status': '❌', 'class': 'danger'},
+                {'name': 'Pool Pumps', 'status': '❌', 'class': 'danger'}
+            ],
+            'class': 'critical'
+        })
+    elif b_active:
+        recommendation_items.append({
+            'icon': '⚠️',
+            'title': 'MINIMIZE LOADS',
+            'description': 'Backup battery active - essential loads only',
+            'appliances': [
+                {'name': 'Oven', 'status': '❌', 'class': 'danger'},
+                {'name': 'Kettle', 'status': '⚠️', 'class': 'warning'},
+                {'name': 'Washing Machine', 'status': '❌', 'class': 'danger'},
+                {'name': 'Pool Pumps', 'status': '❌', 'class': 'danger'}
+            ],
+            'class': 'warning'
+        })
+    elif is_safe_now:
+        recommendation_items.append({
+            'icon': '✅',
+            'title': 'SAFE TO USE HEAVY LOADS',
+            'description': f'Battery: {p_bat:.0f}% | Solar: {tot_sol:.0f}W | Surplus: {surplus_power:.0f}W',
+            'appliances': [
+                {'name': 'Oven', 'status': '✅', 'class': 'good'},
+                {'name': 'Kettle', 'status': '✅', 'class': 'good'},
+                {'name': 'Washing Machine', 'status': '✅', 'class': 'good'},
+                {'name': 'Pool Pumps', 'status': '✅', 'class': 'good'}
+            ],
+            'class': 'good'
+        })
+    elif p_bat < 50 and tot_sol < tot_load:
+        recommendation_items.append({
+            'icon': '⚠️',
+            'title': 'CONSERVE POWER',
+            'description': f'Battery low ({p_bat:.0f}%) and not charging well',
+            'appliances': [
+                {'name': 'Oven', 'status': '❌', 'class': 'danger'},
+                {'name': 'Kettle', 'status': '⚠️', 'class': 'warning'},
+                {'name': 'Washing Machine', 'status': '❌', 'class': 'danger'},
+                {'name': 'Pool Pumps', 'status': '❌', 'class': 'danger'}
+            ],
+            'class': 'warning'
+        })
+    else:
+        recommendation_items.append({
+            'icon': 'ℹ️',
+            'title': 'MONITOR USAGE',
+            'description': 'Check schedule below for optimal times',
+            'appliances': [
+                {'name': 'Oven', 'status': '⚠️', 'class': 'warning'},
+                {'name': 'Kettle', 'status': '✅', 'class': 'good'},
+                {'name': 'Washing Machine', 'status': '⚠️', 'class': 'warning'},
+                {'name': 'Pool Pumps', 'status': 'ℹ️', 'class': 'info'}
+            ],
+            'class': 'normal'
+        })
+    
+    # Schedule items
+    schedule_items = []
+    
+    if s_forecast:
+        best_start, best_end, current_run = None, None, 0
+        temp_start = None
+        for d in s_forecast:
+            gen = d['estimated_generation']
+            if gen > 2000:
+                if current_run == 0: 
+                    temp_start = d['time']
+                current_run += 1
+            else:
+                if current_run > 0:
+                    if best_start is None or current_run > ((best_end.hour if best_end else 0) - (best_start.hour if best_start else 0)):
+                        best_start = temp_start
+                        best_end = d['time']
+                    current_run = 0
+        
+        if best_start and best_end:
+            schedule_items.append({
+                'icon': '🚿',
+                'title': 'Best Time for Heavy Loads',
+                'time': f"{best_start.strftime('%I:%M %p').lstrip('0')} - {best_end.strftime('%I:%M %p').lstrip('0')}",
+                'class': 'good'
+            })
+        else:
+            schedule_items.append({
+                'icon': '☁️',
+                'title': 'No High Solar Window',
+                'time': 'Avoid heavy loads today',
+                'class': 'warning'
+            })
+        
+        # Cloud warnings
+        next_3_gen = sum([d['estimated_generation'] for d in s_forecast[:3]]) / 3 if len(s_forecast) >= 3 else 0
+        current_hour = datetime.now(EAT).hour
+        if next_3_gen < 500 and 8 <= current_hour <= 16:
+            schedule_items.append({
+                'icon': '☁️',
+                'title': 'Cloud Warning',
+                'time': 'Low solar next 3 hours',
+                'class': 'warning'
+            })
 
     html_template = """
 <!DOCTYPE html>
@@ -681,313 +808,194 @@ def home():
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Tulia House Solar Monitor</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Plus+Jakarta+Sans:wght@300;400;600;700;800&display=swap" rel="stylesheet">
+    <title>Tulia House Solar</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3.0.1/dist/chartjs-plugin-annotation.min.js"></script>
     <style>
         :root {
-            --bg-primary: #0a0e1a;
-            --bg-secondary: #141827;
-            --bg-card: #1a1f35;
-            --accent-primary: #00ff88;
-            --accent-secondary: #00ccff;
-            --accent-warning: #ffaa00;
-            --accent-critical: #ff3366;
-            --text-primary: #ffffff;
-            --text-secondary: #a0aec0;
-            --border-color: rgba(255, 255, 255, 0.1);
-            --glow: 0 0 20px rgba(0, 255, 136, 0.3);
+            --bg: #0d1117;
+            --surface: #161b22;
+            --surface-2: #21262d;
+            --border: rgba(48, 54, 61, 0.8);
+            --text: #e6edf3;
+            --text-muted: #8b949e;
+            --primary: #3fb950;
+            --warning: #f0883e;
+            --danger: #f85149;
+            --info: #58a6ff;
         }
         
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
         
         body {
-            font-family: 'Plus Jakarta Sans', -apple-system, sans-serif;
-            background: var(--bg-primary);
-            color: var(--text-primary);
-            line-height: 1.6;
-            overflow-x: hidden;
-        }
-        
-        /* Animated gradient background */
-        body::before {
-            content: '';
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            background: 
-                radial-gradient(circle at 20% 50%, rgba(0, 255, 136, 0.1) 0%, transparent 50%),
-                radial-gradient(circle at 80% 80%, rgba(0, 204, 255, 0.1) 0%, transparent 50%);
-            z-index: -1;
-            animation: gradientShift 15s ease infinite;
-        }
-        
-        @keyframes gradientShift {
-            0%, 100% { opacity: 0.5; }
-            50% { opacity: 0.8; }
+            font-family: 'Inter', -apple-system, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.5;
+            -webkit-font-smoothing: antialiased;
         }
         
         .container {
-            max-width: 1600px;
+            max-width: 1400px;
             margin: 0 auto;
-            padding: 2rem;
+            padding: 1rem;
+        }
+        
+        @media (min-width: 768px) {
+            .container { padding: 2rem; }
         }
         
         /* Header */
         header {
             text-align: center;
-            margin-bottom: 3rem;
-            animation: fadeInDown 0.6s ease;
+            padding: 1.5rem 0;
+            margin-bottom: 2rem;
         }
         
         h1 {
-            font-size: 3.5rem;
+            font-size: clamp(2rem, 5vw, 3rem);
             font-weight: 800;
-            background: linear-gradient(135deg, var(--accent-primary) 0%, var(--accent-secondary) 100%);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            background-clip: text;
+            color: var(--primary);
             margin-bottom: 0.5rem;
-            letter-spacing: -0.03em;
-            text-shadow: var(--glow);
         }
         
         .subtitle {
             font-family: 'JetBrains Mono', monospace;
-            font-size: 0.9rem;
-            color: var(--text-secondary);
+            font-size: 0.85rem;
+            color: var(--text-muted);
             text-transform: uppercase;
-            letter-spacing: 0.15em;
+            letter-spacing: 0.1em;
         }
         
-        /* Card system */
-        .card {
-            background: var(--bg-card);
-            border-radius: 16px;
-            border: 1px solid var(--border-color);
-            padding: 2rem;
-            margin-bottom: 2rem;
-            backdrop-filter: blur(10px);
-            transition: all 0.3s ease;
-            animation: fadeInUp 0.6s ease;
-            animation-fill-mode: both;
-        }
-        
-        .card:hover {
-            border-color: rgba(0, 255, 136, 0.3);
-            box-shadow: 0 8px 32px rgba(0, 255, 136, 0.1);
-            transform: translateY(-2px);
-        }
-        
-        /* Grid layouts */
-        .grid-2 {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-            gap: 1.5rem;
-        }
-        
-        .grid-3 {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-            gap: 1.5rem;
-        }
-        
-        .grid-4 {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 1rem;
-        }
-        
-        /* Status hero */
+        /* Status Hero */
         .status-hero {
-            background: linear-gradient(135deg, var(--bg-secondary) 0%, var(--bg-card) 100%);
-            border-radius: 24px;
-            padding: 3rem;
+            background: linear-gradient(135deg, var(--surface) 0%, var(--surface-2) 100%);
+            border: 2px solid var(--border);
+            border-radius: 1rem;
+            padding: 2rem;
             text-align: center;
-            border: 2px solid var(--border-color);
+            margin-bottom: 2rem;
             position: relative;
             overflow: hidden;
-            animation: fadeInUp 0.6s ease 0.1s both;
         }
         
-        .status-hero::before {
-            content: '';
-            position: absolute;
-            top: -50%;
-            left: -50%;
-            width: 200%;
-            height: 200%;
-            background: radial-gradient(circle, rgba(0, 255, 136, 0.1) 0%, transparent 70%);
-            animation: pulse 4s ease-in-out infinite;
+        .status-hero.critical { border-color: var(--danger); background: linear-gradient(135deg, rgba(248,81,73,0.1), var(--surface-2)); }
+        .status-hero.warning { border-color: var(--warning); background: linear-gradient(135deg, rgba(240,136,62,0.1), var(--surface-2)); }
+        .status-hero.good { border-color: var(--primary); background: linear-gradient(135deg, rgba(63,185,80,0.1), var(--surface-2)); }
+        
+        .status-icon {
+            font-size: 3rem;
+            margin-bottom: 0.5rem;
+            display: inline-block;
+            animation: pulse 2s ease-in-out infinite;
         }
         
         @keyframes pulse {
-            0%, 100% { transform: scale(1); opacity: 0.5; }
+            0%, 100% { transform: scale(1); opacity: 1; }
             50% { transform: scale(1.1); opacity: 0.8; }
         }
         
-        .status-hero.critical::before {
-            background: radial-gradient(circle, rgba(255, 51, 102, 0.2) 0%, transparent 70%);
-        }
-        
-        .status-hero.warning::before {
-            background: radial-gradient(circle, rgba(255, 170, 0, 0.2) 0%, transparent 70%);
-        }
-        
-        .status-hero.good::before {
-            background: radial-gradient(circle, rgba(0, 255, 136, 0.2) 0%, transparent 70%);
-        }
-        
         .status-title {
-            font-size: 2.5rem;
+            font-size: clamp(1.5rem, 4vw, 2.5rem);
             font-weight: 800;
             margin-bottom: 0.5rem;
-            position: relative;
-            z-index: 1;
         }
         
-        .status-hero.critical .status-title { color: var(--accent-critical); }
-        .status-hero.warning .status-title { color: var(--accent-warning); }
-        .status-hero.good .status-title { color: var(--accent-primary); }
-        .status-hero.normal .status-title { color: var(--accent-secondary); }
+        .status-hero.critical .status-title { color: var(--danger); }
+        .status-hero.warning .status-title { color: var(--warning); }
+        .status-hero.good .status-title { color: var(--primary); }
+        .status-hero.normal .status-title { color: var(--info); }
         
         .status-subtitle {
-            font-size: 1.1rem;
-            color: var(--text-secondary);
-            position: relative;
-            z-index: 1;
+            font-size: 1rem;
+            color: var(--text-muted);
         }
         
-        /* Metric cards */
-        .metric-card {
-            background: var(--bg-secondary);
-            border-radius: 12px;
+        /* Grid */
+        .grid { display: grid; gap: 1rem; margin-bottom: 2rem; }
+        .grid-2 { grid-template-columns: 1fr; }
+        .grid-3 { grid-template-columns: 1fr; }
+        .grid-4 { grid-template-columns: repeat(2, 1fr); }
+        
+        @media (min-width: 768px) {
+            .grid-2 { grid-template-columns: repeat(2, 1fr); }
+            .grid-3 { grid-template-columns: repeat(3, 1fr); }
+            .grid-4 { grid-template-columns: repeat(4, 1fr); }
+        }
+        
+        /* Card */
+        .card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 1rem;
             padding: 1.5rem;
-            border: 1px solid var(--border-color);
             transition: all 0.3s ease;
         }
         
-        .metric-card:hover {
-            transform: translateY(-4px);
-            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+        .card:hover {
+            border-color: var(--primary);
+            box-shadow: 0 4px 12px rgba(63, 185, 80, 0.1);
         }
         
+        h2 {
+            font-size: 1.25rem;
+            font-weight: 700;
+            margin-bottom: 1.5rem;
+            color: var(--text);
+        }
+        
+        h3 {
+            font-size: 1rem;
+            font-weight: 600;
+            margin-bottom: 1rem;
+            color: var(--text);
+        }
+        
+        /* Metric Card */
         .metric-label {
-            font-size: 0.85rem;
-            color: var(--text-secondary);
+            font-size: 0.75rem;
+            color: var(--text-muted);
             text-transform: uppercase;
-            letter-spacing: 0.1em;
+            letter-spacing: 0.05em;
             margin-bottom: 0.5rem;
             font-weight: 600;
         }
         
         .metric-value {
-            font-size: 2.5rem;
+            font-size: clamp(1.75rem, 4vw, 2.5rem);
             font-weight: 800;
             font-family: 'JetBrains Mono', monospace;
             line-height: 1;
-            margin-bottom: 0.25rem;
+            margin-bottom: 0.5rem;
         }
         
         .metric-unit {
             font-size: 1rem;
-            color: var(--text-secondary);
             font-weight: 400;
+            color: var(--text-muted);
         }
         
         .metric-trend {
-            font-size: 0.9rem;
-            margin-top: 0.5rem;
+            font-size: 0.85rem;
+            color: var(--text-muted);
             display: flex;
             align-items: center;
             gap: 0.5rem;
         }
         
-        .trend-up { color: var(--accent-primary); }
-        .trend-down { color: var(--accent-critical); }
+        .text-success { color: var(--primary); }
+        .text-warning { color: var(--warning); }
+        .text-danger { color: var(--danger); }
+        .text-info { color: var(--info); }
         
-        /* Responsive Power Flow Visualization */
+        /* Power Flow */
         .power-flow {
             position: relative;
-            height: 400px;
             width: 100%;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            margin: 2rem 0;
-        }
-        
-        @media (max-width: 768px) {
-            .power-flow {
-                height: 300px;
-            }
-            
-            .flow-node {
-                width: 70px !important;
-                height: 70px !important;
-            }
-            
-            .flow-node.inverter {
-                width: 85px !important;
-                height: 85px !important;
-            }
-            
-            .flow-icon {
-                font-size: 1.5rem !important;
-            }
-            
-            .flow-node.inverter .flow-icon {
-                font-size: 2rem !important;
-            }
-            
-            .flow-label {
-                font-size: 0.6rem !important;
-            }
-            
-            .flow-value {
-                font-size: 0.65rem !important;
-            }
-        }
-        
-        @media (max-width: 480px) {
-            .power-flow {
-                height: 250px;
-            }
-            
-            .flow-node {
-                width: 60px !important;
-                height: 60px !important;
-            }
-            
-            .flow-node.inverter {
-                width: 75px !important;
-                height: 75px !important;
-            }
-            
-            .flow-icon {
-                font-size: 1.2rem !important;
-            }
-            
-            .flow-node.inverter .flow-icon {
-                font-size: 1.5rem !important;
-            }
-            
-            .flow-label {
-                font-size: 0.5rem !important;
-            }
-            
-            .flow-value {
-                font-size: 0.55rem !important;
-            }
+            max-width: 600px;
+            aspect-ratio: 1.5;
+            margin: 0 auto;
         }
         
         .flow-svg {
@@ -999,113 +1007,141 @@ def home():
             pointer-events: none;
         }
         
-        .connection-line {
-            transition: stroke 0.3s ease;
-        }
-        
-        .flow-dot {
-            filter: drop-shadow(0 0 8px currentColor);
-        }
-        
         .flow-node {
             position: absolute;
-            width: 90px;
-            height: 90px;
-            border-radius: 50%;
             display: flex;
             flex-direction: column;
             align-items: center;
             justify-content: center;
-            background: var(--bg-secondary);
-            border: 3px solid var(--border-color);
+            background: var(--surface-2);
+            border: 2px solid var(--border);
+            border-radius: 50%;
             transition: all 0.3s ease;
             z-index: 10;
-            cursor: pointer;
-        }
-        
-        .flow-node:hover {
-            transform: scale(1.15) !important;
-            box-shadow: 0 0 30px rgba(0, 255, 136, 0.5);
-            z-index: 20;
         }
         
         .flow-node.active {
-            border-color: var(--accent-primary);
-            box-shadow: 0 0 20px rgba(0, 255, 136, 0.3);
-            animation: pulse-node 2s ease-in-out infinite;
+            border-color: var(--primary);
+            box-shadow: 0 0 20px rgba(63, 185, 80, 0.3);
         }
         
         .flow-node.inverter {
-            width: 110px;
-            height: 110px;
-            background: linear-gradient(135deg, var(--bg-secondary), var(--bg-card));
-            border-width: 4px;
-            border-color: var(--accent-secondary);
-            box-shadow: 0 0 30px rgba(0, 204, 255, 0.4);
+            width: 20%;
+            padding-bottom: 20%;
+            background: linear-gradient(135deg, var(--surface), var(--surface-2));
+            border-width: 3px;
+            border-color: var(--info);
         }
         
-        .flow-node.generator.active {
-            border-color: var(--accent-critical);
-            box-shadow: 0 0 20px rgba(255, 51, 102, 0.4);
-            animation: pulse-critical 1s ease-in-out infinite;
+        .flow-node:not(.inverter) {
+            width: 15%;
+            padding-bottom: 15%;
         }
         
-        @keyframes pulse-node {
-            0%, 100% { 
-                box-shadow: 0 0 20px rgba(0, 255, 136, 0.3);
-            }
-            50% { 
-                box-shadow: 0 0 35px rgba(0, 255, 136, 0.6);
-            }
-        }
-        
-        @keyframes pulse-critical {
-            0%, 100% { 
-                box-shadow: 0 0 20px rgba(255, 51, 102, 0.4);
-            }
-            50% { 
-                box-shadow: 0 0 40px rgba(255, 51, 102, 0.8);
-            }
+        .flow-node-content {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
         }
         
         .flow-icon {
-            font-size: 2rem;
+            font-size: clamp(1rem, 3vw, 1.5rem);
             margin-bottom: 0.25rem;
         }
         
-        .flow-node.inverter .flow-icon {
-            font-size: 2.5rem;
-        }
-        
         .flow-label {
-            font-size: 0.7rem;
+            font-size: clamp(0.5rem, 1.5vw, 0.65rem);
             font-weight: 600;
-            color: var(--text-secondary);
+            color: var(--text-muted);
             text-transform: uppercase;
-            letter-spacing: 0.05em;
-            margin-bottom: 0.15rem;
         }
         
         .flow-value {
-            font-size: 0.75rem;
+            font-size: clamp(0.55rem, 1.5vw, 0.75rem);
             font-family: 'JetBrains Mono', monospace;
-            font-weight: 700;
-            color: var(--accent-primary);
+            font-weight: 600;
+            color: var(--primary);
+            white-space: nowrap;
         }
         
-        .flow-node.generator.active .flow-value,
-        .flow-node.generator.active .flow-label {
-            color: var(--accent-critical);
+        /* Position nodes */
+        .flow-node.solar { top: 50%; left: 5%; transform: translateY(-50%); }
+        .flow-node.inverter { top: 50%; left: 50%; transform: translate(-50%, -50%); }
+        .flow-node.load { top: 50%; right: 5%; transform: translateY(-50%); }
+        .flow-node.battery { bottom: 5%; left: 50%; transform: translateX(-50%); }
+        .flow-node.generator { top: 5%; left: 50%; transform: translateX(-50%); }
+        
+        /* Battery Stack */
+        .battery-stack {
+            position: relative;
+            height: 300px;
+            display: flex;
+            align-items: flex-end;
+            justify-content: center;
+            gap: 1rem;
         }
         
-        /* Battery visualization */
-        .battery-container {
+        .battery-card {
+            width: 100%;
+            max-width: 280px;
+            border: 2px solid var(--border);
+            border-radius: 1rem;
+            overflow: hidden;
+            transition: all 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+            background: var(--surface-2);
+        }
+        
+        .battery-card.primary {
+            height: 100%;
+            z-index: 2;
+        }
+        
+        .battery-card.backup {
+            height: 60%;
+            z-index: 1;
+            opacity: 0.7;
+        }
+        
+        .battery-card.backup.active {
+            height: 100%;
+            z-index: 3;
+            opacity: 1;
+            border-color: var(--warning);
+            box-shadow: 0 0 30px rgba(240, 136, 62, 0.3);
+        }
+        
+        .battery-card.primary.inactive {
+            height: 60%;
+            z-index: 1;
+            opacity: 0.7;
+        }
+        
+        .battery-header {
+            padding: 1rem;
+            border-bottom: 1px solid var(--border);
+            text-align: center;
+        }
+        
+        .battery-header h3 {
+            margin: 0;
+            font-size: 0.9rem;
+            color: var(--text);
+        }
+        
+        .battery-header .capacity {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+        }
+        
+        .battery-visual {
             position: relative;
             height: 200px;
-            background: var(--bg-secondary);
-            border-radius: 12px;
+            background: var(--surface);
             overflow: hidden;
-            border: 2px solid var(--border-color);
         }
         
         .battery-fill {
@@ -1113,7 +1149,7 @@ def home():
             bottom: 0;
             left: 0;
             right: 0;
-            background: linear-gradient(to top, var(--accent-primary), var(--accent-secondary));
+            background: linear-gradient(to top, var(--primary), #58ff80);
             transition: height 1s ease;
             display: flex;
             align-items: center;
@@ -1121,11 +1157,11 @@ def home():
         }
         
         .battery-fill.warning {
-            background: linear-gradient(to top, var(--accent-warning), #ffcc00);
+            background: linear-gradient(to top, var(--warning), #ffa040);
         }
         
         .battery-fill.critical {
-            background: linear-gradient(to top, var(--accent-critical), #ff6688);
+            background: linear-gradient(to top, var(--danger), #ff6060);
         }
         
         .battery-percentage {
@@ -1133,51 +1169,158 @@ def home():
             font-weight: 800;
             font-family: 'JetBrains Mono', monospace;
             color: white;
-            text-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+            text-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
         }
         
-        /* Chart containers */
+        .battery-stats {
+            padding: 1rem;
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 0.5rem;
+            font-size: 0.85rem;
+        }
+        
+        .battery-stat {
+            display: flex;
+            justify-content: space-between;
+        }
+        
+        .battery-stat-label {
+            color: var(--text-muted);
+        }
+        
+        .battery-stat-value {
+            font-family: 'JetBrains Mono', monospace;
+            font-weight: 600;
+        }
+        
+        /* Recommendation Card */
+        .rec-card {
+            border-left: 4px solid var(--border);
+        }
+        
+        .rec-card.critical { border-left-color: var(--danger); background: rgba(248,81,73,0.05); }
+        .rec-card.warning { border-left-color: var(--warning); background: rgba(240,136,62,0.05); }
+        .rec-card.good { border-left-color: var(--primary); background: rgba(63,185,80,0.05); }
+        
+        .rec-header {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            margin-bottom: 1.5rem;
+        }
+        
+        .rec-icon {
+            font-size: 2.5rem;
+        }
+        
+        .rec-title {
+            font-size: 1.25rem;
+            font-weight: 700;
+            margin: 0;
+        }
+        
+        .rec-description {
+            font-size: 0.9rem;
+            color: var(--text-muted);
+            margin-top: 0.25rem;
+        }
+        
+        .appliances-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 0.75rem;
+            margin-top: 1rem;
+        }
+        
+        .appliance-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0.75rem;
+            background: var(--surface-2);
+            border-radius: 0.5rem;
+            border: 1px solid var(--border);
+        }
+        
+        .appliance-name {
+            font-weight: 600;
+            font-size: 0.9rem;
+        }
+        
+        .appliance-status {
+            font-size: 1.25rem;
+        }
+        
+        /* Schedule */
+        .schedule-item {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            padding: 1rem;
+            background: var(--surface-2);
+            border-radius: 0.75rem;
+            margin-bottom: 0.75rem;
+            border: 1px solid var(--border);
+        }
+        
+        .schedule-item.good { border-left: 3px solid var(--primary); }
+        .schedule-item.warning { border-left: 3px solid var(--warning); }
+        
+        .schedule-icon {
+            font-size: 1.5rem;
+        }
+        
+        .schedule-content {
+            flex: 1;
+        }
+        
+        .schedule-title {
+            font-weight: 600;
+            margin-bottom: 0.25rem;
+        }
+        
+        .schedule-time {
+            font-size: 0.85rem;
+            color: var(--text-muted);
+        }
+        
+        /* Chart */
         .chart-container {
             position: relative;
             height: 300px;
             margin: 1rem 0;
         }
         
-        /* Inverter cards */
+        /* Inverter Cards */
         .inverter-card {
-            background: var(--bg-secondary);
-            border-radius: 12px;
-            padding: 1.5rem;
-            border-left: 4px solid var(--accent-secondary);
+            background: var(--surface-2);
+            border: 1px solid var(--border);
+            border-radius: 0.75rem;
+            padding: 1rem;
         }
         
         .inverter-card.fault {
-            border-left-color: var(--accent-critical);
-            background: rgba(255, 51, 102, 0.1);
-        }
-        
-        .inverter-card.warning {
-            border-left-color: var(--accent-warning);
-            background: rgba(255, 170, 0, 0.1);
+            border-color: var(--danger);
+            background: rgba(248,81,73,0.05);
         }
         
         .inverter-header {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            margin-bottom: 1rem;
+            margin-bottom: 0.75rem;
         }
         
         .inverter-name {
             font-weight: 700;
-            font-size: 1.1rem;
         }
         
         .inverter-status {
-            font-size: 0.75rem;
-            padding: 0.25rem 0.75rem;
-            border-radius: 12px;
-            background: var(--bg-card);
+            font-size: 0.7rem;
+            padding: 0.25rem 0.5rem;
+            border-radius: 0.25rem;
+            background: var(--surface);
             text-transform: uppercase;
             font-weight: 600;
         }
@@ -1185,446 +1328,292 @@ def home():
         .inverter-metrics {
             display: grid;
             grid-template-columns: repeat(2, 1fr);
-            gap: 1rem;
+            gap: 0.5rem;
         }
         
         .inverter-metric {
             display: flex;
             justify-content: space-between;
             padding: 0.5rem 0;
-            border-bottom: 1px solid var(--border-color);
+            border-bottom: 1px solid var(--border);
+            font-size: 0.85rem;
         }
         
         .inverter-metric-label {
-            color: var(--text-secondary);
-            font-size: 0.9rem;
+            color: var(--text-muted);
         }
         
         .inverter-metric-value {
-            font-weight: 700;
             font-family: 'JetBrains Mono', monospace;
+            font-weight: 600;
         }
         
-        /* Alerts */
+        /* Alert */
         .alert-item {
             display: flex;
             align-items: center;
             gap: 1rem;
-            padding: 1rem;
-            background: var(--bg-secondary);
-            border-radius: 8px;
+            padding: 0.75rem;
+            background: var(--surface-2);
+            border-radius: 0.5rem;
             margin-bottom: 0.5rem;
-            border-left: 4px solid var(--accent-secondary);
+            border-left: 3px solid var(--border);
         }
         
-        .alert-item.critical {
-            border-left-color: var(--accent-critical);
-            background: rgba(255, 51, 102, 0.1);
-        }
-        
-        .alert-item.warning {
-            border-left-color: var(--accent-warning);
-            background: rgba(255, 170, 0, 0.1);
-        }
+        .alert-item.critical { border-left-color: var(--danger); }
+        .alert-item.warning { border-left-color: var(--warning); }
         
         .alert-time {
             font-family: 'JetBrains Mono', monospace;
-            font-size: 0.85rem;
-            color: var(--text-secondary);
-            min-width: 60px;
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            min-width: 50px;
         }
         
         .alert-message {
             flex: 1;
-            font-weight: 600;
+            font-size: 0.9rem;
         }
         
         /* Animations */
         @keyframes fadeInUp {
-            from {
-                opacity: 0;
-                transform: translateY(30px);
-            }
-            to {
-                opacity: 1;
-                transform: translateY(0);
-            }
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
         }
         
-        @keyframes fadeInDown {
-            from {
-                opacity: 0;
-                transform: translateY(-30px);
-            }
-            to {
-                opacity: 1;
-                transform: translateY(0);
-            }
-        }
-        
-        /* Stagger animation delays */
+        .card { animation: fadeInUp 0.5s ease; }
         .card:nth-child(1) { animation-delay: 0.1s; }
         .card:nth-child(2) { animation-delay: 0.2s; }
         .card:nth-child(3) { animation-delay: 0.3s; }
-        .card:nth-child(4) { animation-delay: 0.4s; }
-        .card:nth-child(5) { animation-delay: 0.5s; }
-        
-        /* Responsive */
-        @media (max-width: 768px) {
-            h1 { font-size: 2.5rem; }
-            .status-title { font-size: 1.8rem; }
-            .metric-value { font-size: 2rem; }
-            .container { padding: 1rem; }
-            .grid-4 {
-                grid-template-columns: repeat(2, 1fr);
-            }
-            .card {
-                padding: 1.5rem;
-            }
-        }
-        
-        @media (max-width: 480px) {
-            h1 { font-size: 2rem; }
-            .status-title { font-size: 1.5rem; }
-            .grid-4 {
-                grid-template-columns: 1fr;
-            }
-            .metric-value { font-size: 1.8rem; }
-        }
-        
-        /* Loading state */
-        .loading {
-            display: inline-block;
-            width: 20px;
-            height: 20px;
-            border: 3px solid var(--border-color);
-            border-top-color: var(--accent-primary);
-            border-radius: 50%;
-            animation: spin 1s linear infinite;
-        }
-        
-        @keyframes spin {
-            to { transform: rotate(360deg); }
-        }
-        
-        /* Recommendations */
-        .recommendation-card {
-            background: linear-gradient(135deg, var(--bg-secondary), var(--bg-card));
-            border: 2px solid var(--border-color);
-        }
-        
-        .recommendation-card.safe {
-            border-color: var(--accent-primary);
-            background: linear-gradient(135deg, rgba(0, 255, 136, 0.1), var(--bg-card));
-        }
-        
-        .recommendation-card.caution {
-            border-color: var(--accent-warning);
-            background: linear-gradient(135deg, rgba(255, 170, 0, 0.1), var(--bg-card));
-        }
-        
-        .recommendation-card.danger {
-            border-color: var(--accent-critical);
-            background: linear-gradient(135deg, rgba(255, 51, 102, 0.1), var(--bg-card));
-        }
-        
-        .recommendation-header {
-            display: flex;
-            align-items: flex-start;
-            gap: 1.5rem;
-            margin-bottom: 1.5rem;
-            padding-bottom: 1.5rem;
-            border-bottom: 1px solid var(--border-color);
-        }
-        
-        .recommendation-icon {
-            font-size: 3rem;
-            flex-shrink: 0;
-        }
-        
-        .recommendation-details {
-            background: var(--bg-secondary);
-            padding: 1.5rem;
-            border-radius: 12px;
-            line-height: 1.8;
-        }
-        
-        .recommendation-details strong {
-            color: var(--accent-primary);
-            font-weight: 700;
-        }
-        
-        .recommendation-card.caution .recommendation-details strong {
-            color: var(--accent-warning);
-        }
-        
-        .recommendation-card.danger .recommendation-details strong {
-            color: var(--accent-critical);
-        }
-        
-        .schedule-content {
-            line-height: 1.8;
-        }
-        
-        .schedule-item {
-            padding: 1rem;
-            background: var(--bg-secondary);
-            border-radius: 8px;
-            margin-bottom: 0.75rem;
-            display: flex;
-            align-items: center;
-            gap: 1rem;
-        }
-        
-        .schedule-item-icon {
-            font-size: 1.5rem;
-            flex-shrink: 0;
-        }
-        
-        .schedule-item-content {
-            flex: 1;
-        }
-        
-        .schedule-item-title {
-            font-weight: 700;
-            margin-bottom: 0.25rem;
-        }
-        
-        .schedule-item-time {
-            color: var(--text-secondary);
-            font-size: 0.9rem;
-        }
-        
-        /* Utility classes */
-        .text-success { color: var(--accent-primary); }
-        .text-warning { color: var(--accent-warning); }
-        .text-danger { color: var(--accent-critical); }
-        .text-info { color: var(--accent-secondary); }
-        
-        h2 {
-            font-size: 1.5rem;
-            font-weight: 700;
-            margin-bottom: 1.5rem;
-            color: var(--text-primary);
-        }
-        
-        h3 {
-            font-size: 1.2rem;
-            font-weight: 600;
-            margin-bottom: 1rem;
-            color: var(--text-primary);
-        }
     </style>
 </head>
 <body>
     <div class="container">
         <header>
             <h1>TULIA HOUSE</h1>
-            <div class="subtitle">Solar Energy Management System</div>
-            <div class="subtitle" style="margin-top: 0.5rem; opacity: 0.6;">{{ timestamp }}</div>
+            <div class="subtitle">Solar Energy System • {{ timestamp }}</div>
         </header>
         
         <!-- Status Hero -->
-        <div class="status-hero {{ status_class }}">
-            <div class="status-title">{{ status_title }}</div>
-            <div class="status-subtitle">{{ status_subtitle }}</div>
+        <div class="status-hero {{ app_col }}">
+            <div class="status-icon">{{ status_icon }}</div>
+            <div class="status-title">{{ app_st }}</div>
+            <div class="status-subtitle">{{ app_sub }}</div>
         </div>
         
-        <!-- Consolidated Recommendations -->
-        <div class="card" style="border: 2px solid {{ recommendation_color }}; background: {{ recommendation_bg }};">
-            <div style="display: flex; align-items: center; gap: 1rem; margin-bottom: 1rem;">
-                <div style="font-size: 3rem;">{{ recommendation_icon }}</div>
-                <div style="flex: 1;">
-                    <h2 style="margin: 0; color: {{ recommendation_color }};">{{ recommendation_title }}</h2>
-                    <p style="margin: 0.5rem 0 0 0; color: var(--text-secondary); font-size: 1.1rem;">{{ recommendation_subtitle }}</p>
-                </div>
-            </div>
-            
-            <div class="grid-2" style="margin-top: 1.5rem;">
-                <div>
-                    <h3 style="font-size: 1rem; margin-bottom: 0.75rem; color: var(--text-secondary);">📅 Smart Schedule (Next 12h)</h3>
-                    <div style="background: var(--bg-secondary); padding: 1rem; border-radius: 8px;">
-                        {{ schedule_content|safe }}
-                    </div>
-                </div>
-                
-                <div>
-                    <h3 style="font-size: 1rem; margin-bottom: 0.75rem; color: var(--text-secondary);">💡 Usage Guidelines</h3>
-                    <div style="background: var(--bg-secondary); padding: 1rem; border-radius: 8px;">
-                        {{ recommendation_details|safe }}
-                    </div>
-                </div>
-            </div>
-        </div>
-        
-        <!-- Key Metrics Grid -->
-        <div class="grid-4" style="margin-top: 2rem;">
-            <div class="metric-card">
+        <!-- Key Metrics -->
+        <div class="grid grid-4">
+            <div class="card">
                 <div class="metric-label">Load Demand</div>
-                <div class="metric-value text-info">{{ load_display }}<span class="metric-unit">W</span></div>
-                <div class="metric-trend {{ load_trend_class }}">
-                    <span>{{ load_trend_icon }}</span>
-                    <span>{{ load_trend_text }}</span>
-                </div>
+                <div class="metric-value text-info">{{ '%0.f'|format(tot_load) }}<span class="metric-unit">W</span></div>
+                <div class="metric-trend">{{ load_trend_icon }} {{ load_trend_text }}</div>
             </div>
             
-            <div class="metric-card">
+            <div class="card">
                 <div class="metric-label">Solar Generation</div>
-                <div class="metric-value text-success">{{ solar_display }}<span class="metric-unit">W</span></div>
-                <div class="metric-trend {{ solar_trend_class }}">
-                    <span>{{ solar_trend_icon }}</span>
-                    <span>{{ solar_trend_text }}</span>
-                </div>
+                <div class="metric-value text-success">{{ '%0.f'|format(tot_sol) }}<span class="metric-unit">W</span></div>
+                <div class="metric-trend">{{ solar_trend_icon }} {{ solar_trend_text }}</div>
             </div>
             
-            <div class="metric-card">
+            <div class="card">
                 <div class="metric-label">Primary Battery</div>
-                <div class="metric-value {{ primary_color }}">{{ primary_display }}<span class="metric-unit">%</span></div>
-                <div style="margin-top: 0.5rem; color: var(--text-secondary); font-size: 0.9rem;">{{ primary_kwh }} kWh</div>
+                <div class="metric-value {{ primary_color }}">{{ '%0.f'|format(p_bat) }}<span class="metric-unit">%</span></div>
+                <div style="margin-top: 0.5rem; color: var(--text-muted); font-size: 0.85rem;">{{ '%0.1f'|format(p_kwh) }} kWh</div>
             </div>
             
-            <div class="metric-card">
+            <div class="card">
                 <div class="metric-label">Backup Battery</div>
-                <div class="metric-value {{ backup_color }}">{{ backup_volt_display }}<span class="metric-unit">V</span></div>
-                <div style="margin-top: 0.5rem; color: var(--text-secondary); font-size: 0.9rem;">{{ backup_kwh }} kWh</div>
+                <div class="metric-value {{ backup_color }}">{{ '%0.1f'|format(b_volt) }}<span class="metric-unit">V</span></div>
+                <div style="margin-top: 0.5rem; color: var(--text-muted); font-size: 0.85rem;">{{ '%0.1f'|format(b_kwh) }} kWh</div>
             </div>
         </div>
         
-        <!-- Responsive Power Flow Visualization -->
+        <!-- Power Flow -->
         <div class="card">
             <h2>Real-time Energy Flow</h2>
             <div class="power-flow">
-                <!-- Connecting Lines (SVG) -->
-                <svg class="flow-svg" viewBox="0 0 100 100" preserveAspectRatio="xMidYMid meet">
-                    <defs>
-                        <!-- Gradient for active flows -->
-                        <linearGradient id="flowGradient" x1="0%" y1="0%" x2="100%" y2="0%">
-                            <stop offset="0%" style="stop-color:#00ff88;stop-opacity:0" />
-                            <stop offset="50%" style="stop-color:#00ff88;stop-opacity:1" />
-                            <stop offset="100%" style="stop-color:#00ff88;stop-opacity:0" />
-                        </linearGradient>
-                        
-                        <linearGradient id="dischargeGradient" x1="0%" y1="0%" x2="100%" y2="0%">
-                            <stop offset="0%" style="stop-color:#ff3366;stop-opacity:0" />
-                            <stop offset="50%" style="stop-color:#ff3366;stop-opacity:1" />
-                            <stop offset="100%" style="stop-color:#ff3366;stop-opacity:0" />
-                        </linearGradient>
-                    </defs>
-                    
-                    <!-- Solar to Inverter line -->
-                    <line x1="10" y1="50" x2="45" y2="50" 
-                          stroke="{{ '#00ff88' if solar_active else 'rgba(255,255,255,0.3)' }}" 
-                          stroke-width="1" class="connection-line"/>
+                <svg class="flow-svg" viewBox="0 0 100 100" preserveAspectRatio="none">
+                    <!-- Solar to Inverter -->
+                    <line x1="12.5" y1="50" x2="37.5" y2="50" 
+                          stroke="{{ 'var(--primary)' if solar_active else 'var(--border)' }}" 
+                          stroke-width="0.5" vector-effect="non-scaling-stroke"/>
                     {% if solar_active %}
-                    <circle r="0.5" fill="#00ff88" class="flow-dot">
-                        <animateMotion dur="2s" repeatCount="indefinite" path="M10,50 L45,50" />
-                    </circle>
-                    <circle r="0.5" fill="#00ff88" class="flow-dot">
-                        <animateMotion dur="2s" repeatCount="indefinite" begin="0.5s" path="M10,50 L45,50" />
+                    <circle r="1" fill="var(--primary)">
+                        <animateMotion dur="2s" repeatCount="indefinite" path="M12.5,50 L37.5,50" />
                     </circle>
                     {% endif %}
                     
-                    <!-- Inverter to Load line -->
-                    <line x1="55" y1="50" x2="90" y2="50" 
-                          stroke="{{ '#00ccff' if load_value > 0 else 'rgba(255,255,255,0.3)' }}" 
-                          stroke-width="1" class="connection-line"/>
-                    {% if load_value > 0 %}
-                    <circle r="0.5" fill="#00ccff" class="flow-dot">
-                        <animateMotion dur="1.5s" repeatCount="indefinite" path="M55,50 L90,50" />
-                    </circle>
-                    <circle r="0.5" fill="#00ccff" class="flow-dot">
-                        <animateMotion dur="1.5s" repeatCount="indefinite" begin="0.4s" path="M55,50 L90,50" />
+                    <!-- Inverter to Load -->
+                    <line x1="62.5" y1="50" x2="87.5" y2="50" 
+                          stroke="{{ 'var(--info)' if tot_load > 0 else 'var(--border)' }}" 
+                          stroke-width="0.5" vector-effect="non-scaling-stroke"/>
+                    {% if tot_load > 0 %}
+                    <circle r="1" fill="var(--info)">
+                        <animateMotion dur="1.5s" repeatCount="indefinite" path="M62.5,50 L87.5,50" />
                     </circle>
                     {% endif %}
                     
-                    <!-- Battery to Inverter line (bidirectional) -->
-                    <line x1="50" y1="52" x2="50" y2="85" 
-                          stroke="{{ '#00ff88' if battery_charging else ('#ff3366' if battery_discharging else 'rgba(255,255,255,0.3)') }}" 
-                          stroke-width="1" class="connection-line"/>
+                    <!-- Battery to Inverter -->
+                    <line x1="50" y1="60" x2="50" y2="87.5" 
+                          stroke="{{ 'var(--primary)' if battery_charging else ('var(--danger)' if battery_discharging else 'var(--border)') }}" 
+                          stroke-width="0.5" vector-effect="non-scaling-stroke"/>
                     {% if battery_charging %}
-                    <!-- Charging: flow DOWN from inverter to battery -->
-                    <circle r="0.5" fill="#00ff88" class="flow-dot">
-                        <animateMotion dur="2s" repeatCount="indefinite" path="M50,52 L50,85" />
+                    <circle r="1" fill="var(--primary)">
+                        <animateMotion dur="2s" repeatCount="indefinite" path="M50,60 L50,87.5" />
                     </circle>
                     {% elif battery_discharging %}
-                    <!-- Discharging: flow UP from battery to inverter -->
-                    <circle r="0.5" fill="#ff3366" class="flow-dot">
-                        <animateMotion dur="2s" repeatCount="indefinite" path="M50,85 L50,52" />
-                    </circle>
-                    <circle r="0.5" fill="#ff3366" class="flow-dot">
-                        <animateMotion dur="2s" repeatCount="indefinite" begin="0.6s" path="M50,85 L50,52" />
+                    <circle r="1" fill="var(--danger)">
+                        <animateMotion dur="2s" repeatCount="indefinite" path="M50,87.5 L50,60" />
                     </circle>
                     {% endif %}
                     
-                    <!-- Generator to Inverter line -->
-                    <line x1="50" y1="15" x2="50" y2="48" 
-                          stroke="{{ '#ff3366' if generator_on else 'rgba(255,255,255,0.3)' }}" 
-                          stroke-width="1" class="connection-line"/>
-                    {% if generator_on %}
-                    <circle r="0.5" fill="#ff3366" class="flow-dot">
-                        <animateMotion dur="1.5s" repeatCount="indefinite" path="M50,15 L50,48" />
-                    </circle>
-                    <circle r="0.5" fill="#ff3366" class="flow-dot">
-                        <animateMotion dur="1.5s" repeatCount="indefinite" begin="0.3s" path="M50,15 L50,48" />
+                    <!-- Generator to Inverter -->
+                    <line x1="50" y1="12.5" x2="50" y2="40" 
+                          stroke="{{ 'var(--danger)' if gen_on else 'var(--border)' }}" 
+                          stroke-width="0.5" vector-effect="non-scaling-stroke"/>
+                    {% if gen_on %}
+                    <circle r="1" fill="var(--danger)">
+                        <animateMotion dur="1.5s" repeatCount="indefinite" path="M50,12.5 L50,40" />
                     </circle>
                     {% endif %}
                 </svg>
                 
-                <!-- Nodes (HTML elements) -->
-                <div class="flow-node solar {{ 'active' if solar_active else '' }}" style="left: 10%; top: 50%; transform: translate(-50%, -50%);">
-                    <div class="flow-icon">☀️</div>
-                    <div class="flow-label">Solar</div>
-                    <div class="flow-value">{{ solar_display }}W</div>
+                <!-- Nodes -->
+                <div class="flow-node solar {{ 'active' if solar_active else '' }}">
+                    <div class="flow-node-content">
+                        <div class="flow-icon">☀️</div>
+                        <div class="flow-label">Solar</div>
+                        <div class="flow-value">{{ '%0.f'|format(tot_sol) }}W</div>
+                    </div>
                 </div>
                 
-                <div class="flow-node inverter active" style="left: 50%; top: 50%; transform: translate(-50%, -50%);">
-                    <div class="flow-icon">⚡</div>
-                    <div class="flow-label">Inverter</div>
-                    <div class="flow-value">{{ inverter_temp }}°C</div>
+                <div class="flow-node inverter active">
+                    <div class="flow-node-content">
+                        <div class="flow-icon">⚡</div>
+                        <div class="flow-label">Inverter</div>
+                        <div class="flow-value">{{ inverter_temp }}°C</div>
+                    </div>
                 </div>
                 
-                <div class="flow-node load active" style="right: 10%; top: 50%; transform: translate(50%, -50%);">
-                    <div class="flow-icon">🏠</div>
-                    <div class="flow-label">Load</div>
-                    <div class="flow-value">{{ load_display }}W</div>
+                <div class="flow-node load active">
+                    <div class="flow-node-content">
+                        <div class="flow-icon">🏠</div>
+                        <div class="flow-label">Load</div>
+                        <div class="flow-value">{{ '%0.f'|format(tot_load) }}W</div>
+                    </div>
                 </div>
                 
-                <div class="flow-node battery {{ 'active' if battery_charging or battery_discharging else '' }}" style="left: 50%; bottom: 15%; transform: translate(-50%, 50%);">
-                    <div class="flow-icon">🔋</div>
-                    <div class="flow-label">Battery</div>
-                    <div class="flow-value">{{ primary_display }}%</div>
+                <div class="flow-node battery {{ 'active' if battery_charging or battery_discharging else '' }}">
+                    <div class="flow-node-content">
+                        <div class="flow-icon">🔋</div>
+                        <div class="flow-label">Battery</div>
+                        <div class="flow-value">{{ '%0.f'|format(p_bat) }}%</div>
+                    </div>
                 </div>
                 
-                <div class="flow-node generator {{ 'active' if generator_on else '' }}" style="left: 50%; top: 15%; transform: translate(-50%, -50%);">
-                    <div class="flow-icon">{{ '⚠️' if generator_on else '🔌' }}</div>
-                    <div class="flow-label">Generator</div>
-                    <div class="flow-value">{{ 'ON' if generator_on else 'OFF' }}</div>
+                <div class="flow-node generator {{ 'active' if gen_on else '' }}">
+                    <div class="flow-node-content">
+                        <div class="flow-icon">{{ '⚠️' if gen_on else '🔌' }}</div>
+                        <div class="flow-label">Generator</div>
+                        <div class="flow-value">{{ 'ON' if gen_on else 'OFF' }}</div>
+                    </div>
                 </div>
             </div>
         </div>
         
-        <!-- Battery Status -->
-        <div class="grid-2">
-            <div class="card">
-                <h2>Primary Battery (30 kWh)</h2>
-                <div class="battery-container">
-                    <div class="battery-fill {{ primary_battery_class }}" style="height: {{ primary_pct }}%;">
-                        <div class="battery-percentage">{{ primary_display }}%</div>
+        <!-- Recommendations and Schedule -->
+        <div class="grid grid-2">
+            {% for rec in recommendation_items %}
+            <div class="card rec-card {{ rec.class }}">
+                <div class="rec-header">
+                    <div class="rec-icon">{{ rec.icon }}</div>
+                    <div>
+                        <h3 class="rec-title">{{ rec.title }}</h3>
+                        <div class="rec-description">{{ rec.description }}</div>
                     </div>
                 </div>
+                
+                <div class="appliances-grid">
+                    {% for appliance in rec.appliances %}
+                    <div class="appliance-item">
+                        <span class="appliance-name">{{ appliance.name }}</span>
+                        <span class="appliance-status">{{ appliance.status }}</span>
+                    </div>
+                    {% endfor %}
+                </div>
             </div>
+            {% endfor %}
             
             <div class="card">
-                <h2>Backup Battery (21 kWh)</h2>
-                <div class="battery-container">
-                    <div class="battery-fill {{ backup_battery_class }}" style="height: {{ backup_pct }}%;">
-                        <div class="battery-percentage">{{ backup_pct_display }}%</div>
+                <h3>📅 Optimal Usage Schedule</h3>
+                {% for item in schedule_items %}
+                <div class="schedule-item {{ item.class }}">
+                    <div class="schedule-icon">{{ item.icon }}</div>
+                    <div class="schedule-content">
+                        <div class="schedule-title">{{ item.title }}</div>
+                        <div class="schedule-time">{{ item.time }}</div>
+                    </div>
+                </div>
+                {% endfor %}
+                {% if not schedule_items %}
+                <div style="text-align: center; padding: 2rem; color: var(--text-muted);">
+                    Calculating optimal schedule...
+                </div>
+                {% endif %}
+            </div>
+        </div>
+        
+        <!-- Battery Status with Stacking -->
+        <div class="card">
+            <h2>Battery Status</h2>
+            <div class="battery-stack">
+                <div class="battery-card primary {{ 'inactive' if b_active else '' }}">
+                    <div class="battery-header">
+                        <h3>Primary Battery</h3>
+                        <div class="capacity">30 kWh Capacity</div>
+                    </div>
+                    <div class="battery-visual">
+                        <div class="battery-fill {{ primary_battery_class }}" style="height: {{ p_bat }}%;">
+                            <div class="battery-percentage">{{ '%0.f'|format(p_bat) }}%</div>
+                        </div>
+                    </div>
+                    <div class="battery-stats">
+                        <div class="battery-stat">
+                            <span class="battery-stat-label">Energy:</span>
+                            <span class="battery-stat-value">{{ '%0.1f'|format(p_kwh) }} kWh</span>
+                        </div>
+                        <div class="battery-stat">
+                            <span class="battery-stat-label">Status:</span>
+                            <span class="battery-stat-value {{ primary_color }}">{{ 'Active' if not b_active else 'Standby' }}</span>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="battery-card backup {{ 'active' if b_active else '' }}">
+                    <div class="battery-header">
+                        <h3>Backup Battery</h3>
+                        <div class="capacity">21 kWh Capacity</div>
+                    </div>
+                    <div class="battery-visual">
+                        <div class="battery-fill {{ backup_battery_class }}" style="height: {{ b_pct }}%;">
+                            <div class="battery-percentage">{{ '%0.f'|format(b_pct) }}%</div>
+                        </div>
+                    </div>
+                    <div class="battery-stats">
+                        <div class="battery-stat">
+                            <span class="battery-stat-label">Voltage:</span>
+                            <span class="battery-stat-value">{{ '%0.1f'|format(b_volt) }}V</span>
+                        </div>
+                        <div class="battery-stat">
+                            <span class="battery-stat-label">Status:</span>
+                            <span class="battery-stat-value {{ backup_color }}">{{ 'Active' if b_active else 'Standby' }}</span>
+                        </div>
                     </div>
                 </div>
             </div>
         </div>
         
-        <!-- Forecast Chart -->
+        <!-- Forecast -->
         <div class="card">
             <h2>12-Hour Forecast</h2>
             <div class="chart-container">
@@ -1632,15 +1621,15 @@ def home():
             </div>
         </div>
         
-        <!-- Battery Life Prediction -->
+        <!-- Battery Prediction -->
         <div class="card">
-            <h2>Total System Capacity Prediction</h2>
+            <h2>System Capacity Prediction</h2>
             <div class="chart-container">
                 <canvas id="predictionChart"></canvas>
             </div>
         </div>
         
-        <!-- Historical Data -->
+        <!-- History -->
         <div class="card">
             <h2>14-Day Power History</h2>
             <div class="chart-container">
@@ -1651,9 +1640,9 @@ def home():
         <!-- Inverter Status -->
         <div class="card">
             <h2>Inverter Status</h2>
-            <div class="grid-3">
-                {% for inv in inverters %}
-                <div class="inverter-card {{ 'fault' if inv.has_fault else ('warning' if inv.high_temperature or inv.communication_lost else '') }}">
+            <div class="grid grid-3">
+                {% for inv in latest_data.get('inverters', []) %}
+                <div class="inverter-card {{ 'fault' if inv.has_fault or inv.high_temperature or inv.communication_lost else '' }}">
                     <div class="inverter-header">
                         <div class="inverter-name">{{ inv.Label }}</div>
                         <div class="inverter-status">{{ inv.Status }}</div>
@@ -1661,23 +1650,23 @@ def home():
                     <div class="inverter-metrics">
                         <div class="inverter-metric">
                             <span class="inverter-metric-label">Power</span>
-                            <span class="inverter-metric-value">{{ inv.OutputPower|round(0)|int }}W</span>
+                            <span class="inverter-metric-value">{{ '%0.f'|format(inv.OutputPower) }}W</span>
                         </div>
                         <div class="inverter-metric">
                             <span class="inverter-metric-label">Solar</span>
-                            <span class="inverter-metric-value">{{ inv.ppv|round(0)|int }}W</span>
+                            <span class="inverter-metric-value">{{ '%0.f'|format(inv.ppv) }}W</span>
                         </div>
                         <div class="inverter-metric">
                             <span class="inverter-metric-label">Battery</span>
-                            <span class="inverter-metric-value">{{ inv.vBat|round(1) }}V</span>
+                            <span class="inverter-metric-value">{{ '%0.1f'|format(inv.vBat) }}V</span>
                         </div>
                         <div class="inverter-metric">
                             <span class="inverter-metric-label">Temp</span>
-                            <span class="inverter-metric-value {{ 'text-danger' if inv.high_temperature else '' }}">{{ inv.temperature|round(1) }}°C</span>
+                            <span class="inverter-metric-value {{ 'text-danger' if inv.high_temperature else '' }}">{{ '%0.1f'|format(inv.temperature) }}°C</span>
                         </div>
                     </div>
                     {% if inv.communication_lost %}
-                    <div style="margin-top: 1rem; padding: 0.5rem; background: rgba(255, 51, 102, 0.2); border-radius: 6px; text-align: center; font-size: 0.85rem; color: var(--accent-critical);">
+                    <div style="margin-top: 0.75rem; padding: 0.5rem; background: rgba(248, 81, 73, 0.1); border-radius: 0.5rem; text-align: center; font-size: 0.85rem; color: var(--danger);">
                         ⚠️ Communication Lost
                     </div>
                     {% endif %}
@@ -1686,30 +1675,28 @@ def home():
             </div>
         </div>
         
-        <!-- Recent Alerts -->
+        <!-- Alerts -->
         <div class="card">
             <h2>Recent Alerts (Last 12 Hours)</h2>
-            <div id="alertsContainer">
-                {% if alerts %}
-                    {% for alert in alerts %}
-                    <div class="alert-item {{ alert.type }}">
-                        <div class="alert-time">{{ alert.time }}</div>
-                        <div class="alert-message">{{ alert.subject }}</div>
-                    </div>
-                    {% endfor %}
-                {% else %}
-                    <div style="text-align: center; padding: 2rem; color: var(--text-secondary);">
-                        No recent alerts - system operating normally
-                    </div>
-                {% endif %}
-            </div>
+            {% if alerts %}
+                {% for alert in alerts %}
+                <div class="alert-item {{ alert.type }}">
+                    <div class="alert-time">{{ alert.time }}</div>
+                    <div class="alert-message">{{ alert.subject }}</div>
+                </div>
+                {% endfor %}
+            {% else %}
+                <div style="text-align: center; padding: 2rem; color: var(--text-muted);">
+                    No recent alerts - system operating normally
+                </div>
+            {% endif %}
         </div>
     </div>
     
     <script>
-        // Chart.js default config
-        Chart.defaults.color = '#a0aec0';
-        Chart.defaults.borderColor = 'rgba(255, 255, 255, 0.1)';
+        // Chart.js config
+        Chart.defaults.color = '#8b949e';
+        Chart.defaults.borderColor = 'rgba(48, 54, 61, 0.3)';
         
         // Forecast Chart
         const forecastCtx = document.getElementById('forecastChart').getContext('2d');
@@ -1719,19 +1706,19 @@ def home():
                 labels: {{ forecast_times|tojson }},
                 datasets: [
                     {
-                        label: 'Predicted Solar',
+                        label: 'Solar',
                         data: {{ forecast_solar|tojson }},
-                        borderColor: '#00ff88',
-                        backgroundColor: 'rgba(0, 255, 136, 0.1)',
+                        borderColor: '#3fb950',
+                        backgroundColor: 'rgba(63, 185, 80, 0.1)',
                         fill: true,
                         tension: 0.4,
                         borderWidth: 2
                     },
                     {
-                        label: 'Predicted Load',
+                        label: 'Load',
                         data: {{ forecast_load|tojson }},
-                        borderColor: '#00ccff',
-                        backgroundColor: 'rgba(0, 204, 255, 0.1)',
+                        borderColor: '#58a6ff',
+                        backgroundColor: 'rgba(88, 166, 255, 0.1)',
                         fill: true,
                         tension: 0.4,
                         borderWidth: 2
@@ -1742,44 +1729,22 @@ def home():
                 responsive: true,
                 maintainAspectRatio: false,
                 plugins: {
-                    legend: {
-                        display: true,
-                        position: 'top',
-                        labels: {
-                            usePointStyle: true,
-                            padding: 15
-                        }
-                    },
+                    legend: { display: true, position: 'top' },
                     tooltip: {
                         mode: 'index',
                         intersect: false,
-                        backgroundColor: 'rgba(26, 31, 53, 0.95)',
-                        borderColor: 'rgba(255, 255, 255, 0.1)',
+                        backgroundColor: 'rgba(22, 27, 34, 0.95)',
+                        borderColor: 'rgba(48, 54, 61, 0.8)',
                         borderWidth: 1
                     }
                 },
                 scales: {
                     y: {
                         beginAtZero: true,
-                        grid: {
-                            color: 'rgba(255, 255, 255, 0.05)'
-                        },
-                        ticks: {
-                            callback: function(value) {
-                                return value + 'W';
-                            }
-                        }
+                        grid: { color: 'rgba(48, 54, 61, 0.3)' },
+                        ticks: { callback: v => v + 'W' }
                     },
-                    x: {
-                        grid: {
-                            display: false
-                        }
-                    }
-                },
-                interaction: {
-                    mode: 'nearest',
-                    axis: 'x',
-                    intersect: false
+                    x: { grid: { display: false } }
                 }
             }
         });
@@ -1791,13 +1756,13 @@ def home():
             data: {
                 labels: {{ sim_t|tojson }},
                 datasets: [{
-                    label: 'Total System Capacity',
+                    label: 'Total Capacity',
                     data: {{ trace_pct|tojson }},
-                    borderColor: '#00ccff',
+                    borderColor: '#58a6ff',
                     segment: {
-                        borderColor: ctx => ctx.p0.parsed.y < 48 ? '#ffaa00' : '#00ff88'
+                        borderColor: ctx => ctx.p0.parsed.y < 48 ? '#f0883e' : '#3fb950'
                     },
-                    backgroundColor: 'rgba(0, 204, 255, 0.1)',
+                    backgroundColor: 'rgba(88, 166, 255, 0.1)',
                     fill: true,
                     tension: 0.4,
                     borderWidth: 3
@@ -1807,38 +1772,22 @@ def home():
                 responsive: true,
                 maintainAspectRatio: false,
                 plugins: {
-                    legend: {
-                        display: true,
-                        position: 'top'
-                    },
+                    legend: { display: true },
                     annotation: {
                         annotations: {
                             backup: {
                                 type: 'line',
                                 yMin: 48,
                                 yMax: 48,
-                                borderColor: '#ffaa00',
+                                borderColor: '#f0883e',
                                 borderWidth: 2,
                                 borderDash: [5, 5],
                                 label: {
                                     content: 'Backup Activation (48%)',
                                     display: true,
                                     position: 'start',
-                                    backgroundColor: 'rgba(255, 170, 0, 0.8)',
+                                    backgroundColor: 'rgba(240, 136, 62, 0.8)',
                                     color: '#000'
-                                }
-                            },
-                            critical: {
-                                type: 'line',
-                                yMin: 0,
-                                yMax: 0,
-                                borderColor: '#ff3366',
-                                borderWidth: 2,
-                                label: {
-                                    content: 'Generator Required (0%)',
-                                    display: true,
-                                    backgroundColor: 'rgba(255, 51, 102, 0.8)',
-                                    color: '#fff'
                                 }
                             }
                         }
@@ -1848,20 +1797,10 @@ def home():
                     y: {
                         min: 0,
                         max: 100,
-                        grid: {
-                            color: 'rgba(255, 255, 255, 0.05)'
-                        },
-                        ticks: {
-                            callback: function(value) {
-                                return value + '%';
-                            }
-                        }
+                        grid: { color: 'rgba(48, 54, 61, 0.3)' },
+                        ticks: { callback: v => v + '%' }
                     },
-                    x: {
-                        grid: {
-                            display: false
-                        }
-                    }
+                    x: { grid: { display: false } }
                 }
             }
         });
@@ -1876,18 +1815,18 @@ def home():
                     {
                         label: 'Load',
                         data: {{ l_vals|tojson }},
-                        borderColor: '#00ccff',
-                        backgroundColor: 'rgba(0, 204, 255, 0.1)',
+                        borderColor: '#58a6ff',
+                        backgroundColor: 'rgba(88, 166, 255, 0.1)',
                         fill: true,
                         tension: 0.4,
                         borderWidth: 2,
                         pointRadius: 0
                     },
                     {
-                        label: 'Battery Discharge',
+                        label: 'Discharge',
                         data: {{ b_vals|tojson }},
-                        borderColor: '#ff3366',
-                        backgroundColor: 'rgba(255, 51, 102, 0.1)',
+                        borderColor: '#f85149',
+                        backgroundColor: 'rgba(248, 81, 73, 0.1)',
                         fill: true,
                         tension: 0.4,
                         borderWidth: 2,
@@ -1898,287 +1837,48 @@ def home():
             options: {
                 responsive: true,
                 maintainAspectRatio: false,
-                plugins: {
-                    legend: {
-                        display: true,
-                        position: 'top'
-                    }
-                },
+                plugins: { legend: { display: true } },
                 scales: {
                     y: {
                         beginAtZero: true,
-                        grid: {
-                            color: 'rgba(255, 255, 255, 0.05)'
-                        },
-                        ticks: {
-                            callback: function(value) {
-                                return value + 'W';
-                            }
-                        }
+                        grid: { color: 'rgba(48, 54, 61, 0.3)' },
+                        ticks: { callback: v => v + 'W' }
                     },
                     x: {
-                        grid: {
-                            display: false
-                        },
-                        ticks: {
-                            maxRotation: 45,
-                            minRotation: 45
-                        }
+                        grid: { display: false },
+                        ticks: { maxRotation: 45, minRotation: 45 }
                     }
                 }
             }
         });
         
-        // Auto-refresh data every 30 seconds
+        // Auto-refresh every 30 seconds
         setInterval(() => {
             fetch('/api/data')
                 .then(res => res.json())
-                .then(data => {
-                    // Update values without full page reload
-                    console.log('Data refreshed:', data.timestamp);
-                })
+                .then(data => console.log('Refreshed:', data.timestamp))
                 .catch(err => console.error('Refresh error:', err));
         }, 30000);
-        
-        // Handle window resize for power flow
-        window.addEventListener('resize', function() {
-            // SVG will automatically scale with viewBox and preserveAspectRatio
-            console.log('Window resized - SVG should maintain connections');
-        });
     </script>
 </body>
 </html>
     """
     
-    # Determine trends
-    load_trend_icon = "↑" if tot_load > 2000 else "→" if tot_load > 1000 else "↓"
-    load_trend_text = "High" if tot_load > 2000 else "Moderate" if tot_load > 1000 else "Low"
-    load_trend_class = "trend-up" if tot_load > 2000 else "trend-down" if tot_load < 1000 else ""
-    
-    solar_trend_icon = "☀️" if tot_sol > 5000 else "⛅" if tot_sol > 2000 else "☁️"
-    solar_trend_text = "Excellent" if tot_sol > 5000 else "Good" if tot_sol > 2000 else "Low"
-    solar_trend_class = "trend-up" if tot_sol > 2000 else "trend-down"
-    
-    # Battery classes
-    primary_color = "text-success" if p_bat > 60 else "text-warning" if p_bat > 40 else "text-danger"
-    backup_color = "text-success" if b_volt > 52.3 else "text-warning" if b_volt > 51.5 else "text-danger"
-    
-    primary_battery_class = "" if p_bat > 60 else "warning" if p_bat > 40 else "critical"
-    backup_battery_class = "" if b_pct > 60 else "warning" if b_pct > 40 else "critical"
-    
-    # Power flow states
-    solar_active = tot_sol > 50
-    battery_active = tot_dis > 50 or surplus_power > 50
-    battery_charging = surplus_power > 50
-    battery_discharging = tot_dis > 50
-    
-    # Get average inverter temperature
-    inverter_temps = [inv.get('temperature', 0) for inv in latest_data.get('inverters', [])]
-    inverter_temp = f"{(sum(inverter_temps) / len(inverter_temps)):.0f}" if inverter_temps else "0"
-    
-    # Prepare alerts
-    alerts = [{"time": a['timestamp'].strftime("%H:%M"), "subject": a['subject'], "type": a['type']} 
-              for a in reversed(alert_history[-10:])]
-    
-    # Consolidated recommendations (single set of variables)
-    if gen_on:
-        recommendation_icon = "🚨"
-        recommendation_title = "CRITICAL - Generator Running"
-        recommendation_subtitle = "Immediate action required"
-        recommendation_class = "danger"
-        recommendation_details = f"""
-            <strong>⛔ DO NOT use any heavy loads:</strong><br>
-            • Generator running - this is expensive<br>
-            • Turn off pool pumps immediately<br>
-            • Minimize all non-essential loads<br>
-            • Battery voltage: {b_volt:.1f}V (critical)
-        """
-    elif b_active:
-        recommendation_icon = "⚠️"
-        recommendation_title = "Backup Battery Active"
-        recommendation_subtitle = "Primary battery depleted"
-        recommendation_class = "danger"
-        recommendation_details = f"""
-            <strong>❌ Heavy loads NOT recommended:</strong><br>
-            • Backup battery active: {b_volt:.1f}V<br>
-            • Avoid oven, kettle, high-power appliances<br>
-            • Primary battery: {p_bat:.0f}% (depleted)<br>
-            • Wait for solar charging to resume
-        """
-    elif p_bat > 95:
-        recommendation_icon = "🔋"
-        recommendation_title = "Battery Full - Use Power Now!"
-        recommendation_subtitle = "Excellent time for heavy loads"
-        recommendation_class = "safe"
-        recommendation_details = f"""
-            <strong>✅ ALL heavy loads are SAFE:</strong><br>
-            • Battery: {p_bat:.0f}% (fully charged)<br>
-            • Surplus: {surplus_power:.0f}W available<br>
-            • Oven, kettle, washing machine: ✅ Safe<br>
-            • Pool pumps: Can run
-        """
-    elif (p_bat > 75 and surplus_power > 3000):
-        recommendation_icon = "⚡"
-        recommendation_title = "High Surplus - Perfect Time!"
-        recommendation_subtitle = f"Excess power: {surplus_power:.0f}W available"
-        recommendation_class = "safe"
-        recommendation_details = f"""
-            <strong>✅ Excellent conditions for heavy loads:</strong><br>
-            • Surplus: {surplus_power:.0f}W available<br>
-            • Battery: {p_bat:.0f}% ({p_kwh:.1f} kWh)<br>
-            • Oven (2000-3000W): ✅ Safe<br>
-            • Kettle (1500-2000W): ✅ Safe
-        """
-    elif tot_sol > 2000 and (tot_sol > tot_load * 0.9):
-        recommendation_icon = "☀️"
-        recommendation_title = "Solar Powering System"
-        recommendation_subtitle = "Good solar generation"
-        recommendation_class = "safe"
-        recommendation_details = f"""
-            <strong>✅ Moderate loads are safe:</strong><br>
-            • Solar: {tot_sol:.0f}W<br>
-            • Load: {tot_load:.0f}W<br>
-            • Battery: {p_bat:.0f}%<br>
-            • Kettle & washing machine: ✅ Safe<br>
-            • Oven: ⚠️ Monitor battery
-        """
-    elif weather_bad and p_bat > 80:
-        recommendation_icon = "⚡"
-        recommendation_title = "Cook Now - Bad Weather Ahead"
-        recommendation_subtitle = "Poor solar forecast expected"
-        recommendation_class = "safe"
-        recommendation_details = f"""
-            <strong>⚡ Use power NOW before conditions worsen:</strong><br>
-            • Battery: {p_bat:.0f}% (excellent level)<br>
-            • Poor solar forecast ahead<br>
-            • Better to use stored energy than waste it<br>
-            • Heavy loads recommended while battery is high
-        """
-    elif weather_bad and p_bat < 70:
-        recommendation_icon = "☁️"
-        recommendation_title = "Conserve Power"
-        recommendation_subtitle = "Low solar forecast & moderate battery"
-        recommendation_class = "caution"
-        recommendation_details = f"""
-            <strong>⚠️ Minimize heavy loads:</strong><br>
-            • Battery: {p_bat:.0f}% (moderate)<br>
-            • Poor solar conditions forecast<br>
-            • Avoid oven and kettle if possible<br>
-            • Delay washing/drying until conditions improve
-        """
-    elif p_bat < 45 and tot_sol < tot_load:
-        recommendation_icon = "⚠️"
-        recommendation_title = "Reduce Loads"
-        recommendation_subtitle = "Battery low & discharging"
-        recommendation_class = "caution"
-        recommendation_details = f"""
-            <strong>⚠️ Heavy loads NOT recommended:</strong><br>
-            • Battery: {p_bat:.0f}% (low)<br>
-            • Discharging at: {tot_dis:.0f}W<br>
-            • Avoid oven, kettle, heavy appliances<br>
-            • Wait for better solar generation
-        """
-    elif surplus_power > 100:
-        recommendation_icon = "🔋"
-        recommendation_title = "Battery Charging"
-        recommendation_subtitle = "System recovering"
-        recommendation_class = "safe"
-        recommendation_details = f"""
-            <strong>✅ Light to moderate loads OK:</strong><br>
-            • Charging: +{surplus_power:.0f}W<br>
-            • Battery: {p_bat:.0f}%<br>
-            • Kettle & small appliances: Safe<br>
-            • Oven: Wait for higher surplus
-        """
-    else:
-        recommendation_icon = "ℹ️"
-        recommendation_title = "Normal Operation"
-        recommendation_subtitle = "System running within parameters"
-        recommendation_class = "safe"
-        recommendation_details = f"""
-            <strong>System Status:</strong><br>
-            • Load: {tot_load:.0f}W<br>
-            • Solar: {tot_sol:.0f}W<br>
-            • Battery: {p_bat:.0f}% ({p_kwh:.1f} kWh)<br>
-            • Net: {surplus_power:.0f}W {'surplus' if surplus_power > 0 else 'deficit'}<br>
-            • Light loads: ✅ Safe | Heavy loads: Check battery first
-        """
-    
-    # Smart Schedule - simplified
-    schedule_items = []
-    forecast_data = latest_data.get('solar_forecast', [])
-    
-    # Add current status
-    current_hour = datetime.now(EAT).hour
-    if 6 <= current_hour <= 18 and tot_sol > 1000:
-        schedule_items.append({
-            'icon': '☀️',
-            'title': 'Good Solar Now',
-            'time': f'{current_hour}:00 - {(current_hour + 2) % 24}:00',
-            'type': 'safe'
-        })
-    
-    # Add evening warning if battery is low
-    if current_hour >= 16 and p_bat < 50:
-        schedule_items.append({
-            'icon': '🌙',
-            'title': 'Evening - Conserve Power',
-            'time': 'After sunset',
-            'type': 'caution'
-        })
-    
-    # Build schedule content
-    schedule_content = ""
-    if schedule_items:
-        for item in schedule_items:
-            color = "var(--accent-primary)" if item['type'] == 'safe' else ("var(--accent-warning)" if item['type'] == 'caution' else "var(--accent-critical)")
-            schedule_content += f"""
-                <div class="schedule-item">
-                    <div class="schedule-item-icon">{item['icon']}</div>
-                    <div class="schedule-item-content">
-                        <div class="schedule-item-title" style="color: {color};">{item['title']}</div>
-                        <div class="schedule-item-time">{item['time']}</div>
-                    </div>
-                </div>
-            """
-    else:
-        if not latest_data or 'solar_forecast' not in latest_data or not latest_data['solar_forecast']:
-            schedule_content = '<div style="text-align: center; padding: 1rem; color: var(--text-secondary);">Initializing forecast data...<br><small>First poll in progress (check console)</small></div>'
-        else:
-            schedule_content = '<div style="text-align: center; padding: 2rem; color: var(--text-secondary);">No specific schedule items</div>'
-
-    # Recommendation styling
-    recommendation_color = "var(--accent-primary)" if recommendation_class == "safe" else ("var(--accent-warning)" if recommendation_class == "caution" else "var(--accent-critical)")
-    recommendation_bg = "rgba(0, 255, 136, 0.05)" if recommendation_class == "safe" else ("rgba(255, 170, 0, 0.05)" if recommendation_class == "caution" else "rgba(255, 51, 102, 0.05)")
-    
+    from flask import render_template_string
     return render_template_string(
         html_template,
         timestamp=latest_data.get('timestamp', 'Initializing...'),
-        status_title=app_st,
-        status_subtitle=app_sub,
-        status_class=app_col,
-        recommendation_icon=recommendation_icon,
-        recommendation_title=recommendation_title,
-        recommendation_subtitle=recommendation_subtitle,
-        recommendation_class=recommendation_class,
-        recommendation_details=recommendation_details,
-        recommendation_color=recommendation_color,
-        recommendation_bg=recommendation_bg,
-        schedule_content=schedule_content,
-        # Numeric values for logic
-        load_value=tot_load,
-        solar_value=tot_sol,
-        primary_pct=p_bat,
-        backup_volt=b_volt,
-        backup_pct=b_pct,
-        # Formatted strings for display
-        load_display=f"{tot_load:.0f}",
-        solar_display=f"{tot_sol:.0f}",
-        primary_display=f"{p_bat:.0f}",
-        backup_volt_display=f"{b_volt:.1f}",
-        backup_pct_display=f"{b_pct:.0f}",
-        primary_kwh=f"{p_kwh:.1f}",
-        backup_kwh=f"{b_kwh:.1f}",
+        status_icon=status_icon,
+        app_st=app_st,
+        app_sub=app_sub,
+        app_col=app_col,
+        tot_load=tot_load,
+        tot_sol=tot_sol,
+        p_bat=p_bat,
+        b_volt=b_volt,
+        p_kwh=p_kwh,
+        b_kwh=b_kwh,
+        b_pct=b_pct,
         load_trend_icon=load_trend_icon,
         load_trend_text=load_trend_text,
         load_trend_class=load_trend_class,
@@ -2190,11 +1890,13 @@ def home():
         primary_battery_class=primary_battery_class,
         backup_battery_class=backup_battery_class,
         solar_active=solar_active,
-        battery_active=battery_active,
         battery_charging=battery_charging,
         battery_discharging=battery_discharging,
-        generator_on=gen_on,
+        gen_on=gen_on,
+        b_active=b_active,
         inverter_temp=inverter_temp,
+        recommendation_items=recommendation_items,
+        schedule_items=schedule_items,
         forecast_times=forecast_times,
         forecast_solar=forecast_solar,
         forecast_load=forecast_load,
@@ -2203,15 +1905,10 @@ def home():
         times=times,
         l_vals=l_vals,
         b_vals=b_vals,
-        inverters=latest_data.get('inverters', []),
+        latest_data=latest_data,
         alerts=alerts
     )
 
 if __name__ == "__main__":
-    # Start polling in background
     Thread(target=poll_growatt, daemon=True).start()
-    print("🚀 Starting Flask server...")
-    print("📡 Polling thread started in background")
-    print(f"🔌 API Token: {'Set' if TOKEN else 'NOT SET - check environment variables'}")
-    print(f"🔢 Serial numbers: {SERIAL_NUMBERS}")
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)), debug=False)
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
