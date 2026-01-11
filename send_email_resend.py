@@ -798,6 +798,10 @@ def home():
             background: radial-gradient(circle, rgba(255, 170, 0, 0.2) 0%, transparent 70%);
         }
         
+        .status-hero.good::before {
+            background: radial-gradient(circle, rgba(0, 255, 136, 0.2) 0%, transparent 70%);
+        }
+        
         .status-title {
             font-size: 2.5rem;
             font-weight: 800;
@@ -2023,13 +2027,13 @@ def home():
                         best_end = d['time']
                     current_run = 0
         
-      if best_start and best_end:
-        schedule_items.append({
-            'icon': '🚿',
-            'title': 'Best Time for Washing/Heavy Loads',
-            'time': f"{best_start.strftime('%I:%M %p').lstrip('0')} - {best_end.strftime('%I:%M %p').lstrip('0')}",
-            'type': 'safe'
-        })
+        if best_start and best_end:
+            schedule_items.append({
+                'icon': '🚿',
+                'title': 'Best Time for Washing/Heavy Loads',
+                'time': f"{best_start.strftime('%I:%M %p').lstrip('0')} - {best_end.strftime('%I:%M %p').lstrip('0')}",
+                'type': 'safe'
+            })
     elif not is_safe_now: # Fix: Only warn if not currently safe
         schedule_items.append({
             'icon': '⚠️',
@@ -2066,30 +2070,10 @@ def home():
     else:
         schedule_content = '<div style="text-align: center; padding: 2rem; color: var(--text-secondary);">Initializing forecast data...</div>'
 
-    # --- VARIABLE FIX: Define variables for the empty cards ---
+    # Define variables for the empty cards
     schedule_html = schedule_content
     usage_guidelines = recommendation_details
-
-    return render_template_string(
-        html_template,
-        timestamp=latest_data.get('timestamp', 'Initializing...'),
-        status_title=app_st,
-        status_subtitle=app_sub,
-        status_class=app_col,
-        recommendation_icon=recommendation_icon,
-        recommendation_title=recommendation_title,
-        recommendation_subtitle=recommendation_subtitle,
-        recommendation_class=recommendation_class,
-        recommendation_details=recommendation_details,
-        
-        # FIX: Pass the newly defined variables
-        schedule_content=schedule_content,
-        schedule_html=schedule_html,         
-        usage_guidelines=usage_guidelines,
     
-    from flask import render_template_string
-    usage_guidelines = recommendation_details
-    schedule_html = schedule_content
     return render_template_string(
         html_template,
         schedule_html=schedule_html,  
