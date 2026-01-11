@@ -80,9 +80,10 @@ pool_pump_start_time = None
 pool_pump_last_alert = None
 
 # Historical Data & Forecast Containers
+# Increased to hold ~14 days of 5-min polling data (14 * 24 * 12 = 4032)
 solar_forecast = []
-solar_generation_pattern = deque(maxlen=100) # Increased history size
-load_demand_pattern = deque(maxlen=100)      # Increased history size
+solar_generation_pattern = deque(maxlen=5000)
+load_demand_pattern = deque(maxlen=5000)
 SOLAR_EFFICIENCY_FACTOR = 0.85
 FORECAST_HOURS = 12
 EAT = timezone(timedelta(hours=3))
@@ -463,10 +464,11 @@ def poll_growatt():
             inv_data.sort(key=lambda x: x.get('DisplayOrder', 99))
             update_patterns(tot_sol, tot_out)
             
+            # EXPANDED HISTORY: Keep 14 days of data in memory
             load_history.append((now, tot_out))
-            load_history[:] = [(t, p) for t, p in load_history if t >= (now - timedelta(hours=12))]
+            load_history[:] = [(t, p) for t, p in load_history if t >= (now - timedelta(days=14))]
             battery_history.append((now, tot_bat))
-            battery_history[:] = [(t, p) for t, p in battery_history if t >= (now - timedelta(hours=12))]
+            battery_history[:] = [(t, p) for t, p in battery_history if t >= (now - timedelta(days=14))]
             
             # Use Historical Patterns for Forecasting
             s_pat = analyze_historical_solar_pattern()
@@ -549,29 +551,36 @@ def home():
     weather_bad = sol_cond and sol_cond['poor_conditions']
     surplus_power = tot_sol - tot_load
 
-    # Calculate Flow Speeds (for animation duration)
-    # Higher power = lower duration (faster)
+    # Calculate Flow Speeds
     def get_anim_speed(watts):
         if watts < 100: return "1000s" # Stopped
         if watts < 1000: return "3s"
         if watts < 3000: return "1.5s"
         return "0.8s"
 
-    # Determine Flow States
-    # Solar -> House: Always true if solar > 0 and load > 0 (simplified)
-    # Solar -> Battery: if Surplus > 0
-    # Battery -> House: if tot_dis > 0
-    # Grid -> House: if gen_on
-    
+    # Determine Flow States for the HUB Layout
     flow_s_h = min(tot_sol, tot_load) if tot_sol > 0 else 0
     flow_s_b = max(0, surplus_power)
     flow_b_h = tot_dis
     flow_g_h = tot_load if gen_on else 0
 
-    anim_s_h = get_anim_speed(flow_s_h)
-    anim_s_b = get_anim_speed(flow_s_b)
-    anim_b_h = get_anim_speed(flow_b_h)
+    anim_s_h = get_anim_speed(tot_sol)
     anim_g_h = get_anim_speed(flow_g_h)
+    anim_load = get_anim_speed(tot_load)
+    
+    # Battery Flow: Down = Charge, Up = Discharge
+    bat_anim_class = "stopped"
+    bat_anim_speed = "1000s"
+    if flow_s_b > 100:
+        bat_anim_class = "flow-down"
+        bat_anim_speed = get_anim_speed(flow_s_b)
+        bat_dot_color = "#28a745" # Green charging
+    elif flow_b_h > 100:
+        bat_anim_class = "flow-up"
+        bat_anim_speed = get_anim_speed(flow_b_h)
+        bat_dot_color = "#dc3545" # Red discharging
+    else:
+        bat_dot_color = "#ccc"
 
     # 2. Status Logic (Oven Safe / Warnings)
     if gen_on:
@@ -581,7 +590,6 @@ def home():
     elif p_bat < 45 and tot_sol < tot_load:
         app_st, app_sub, app_col = "⚠️ REDUCE LOADS", "Primary Low & Discharging", "warning"
     
-    # LOGIC: Oven Safe if (Bat > 75% AND Surplus > 3kW) OR (Bat > 95% AND Good Weather)
     elif (p_bat > 75 and surplus_power > 3000) or (p_bat > 95 and not weather_bad):
         reason = f"Surplus {surplus_power/1000:.1f}kW" if surplus_power > 3000 else "Battery Full & Sunny"
         app_st, app_sub, app_col = "✅ OVEN/KETTLE SAFE", reason, "good"
@@ -597,17 +605,15 @@ def home():
         
     w_bdg, w_cls = ("☁️ Low Solar Day", "poor") if weather_bad else ("☀️ High Solar Day", "good")
 
-    # 3. Smart Schedule Logic (Next 12h)
+    # 3. Smart Schedule Logic
     schedule_html = ""
     forecast_data = latest_data.get('solar_forecast', [])
     if forecast_data:
-        # Find best consecutive hours
         best_start, best_end, current_run = None, None, 0
         best_max_gen = 0
-        
         for d in forecast_data:
             gen = d['estimated_generation']
-            if gen > 2000: # 2kW threshold
+            if gen > 2000:
                 if current_run == 0: temp_start = d['time']
                 current_run += 1
                 if gen > best_max_gen: best_max_gen = gen
@@ -618,7 +624,6 @@ def home():
                         best_end = d['time']
                     current_run = 0
         
-        # Format the Schedule Card
         schedule_html += '<ul style="padding-left:20px; margin:0;">'
         if best_start:
             s_str = best_start.strftime("%I %p").lstrip("0")
@@ -626,18 +631,18 @@ def home():
             schedule_html += f'<li style="margin-bottom:10px"><strong>🚿 Best Washing Time:</strong><br>{s_str} - {e_str} today.</li>'
         else:
             schedule_html += '<li style="margin-bottom:10px; color:#dc3545"><strong>⚠️ No High Solar Window:</strong><br>Avoid heavy loads today.</li>'
-            
-        # Check Next 3 Hours specifically
+        
         next_3_gen = sum([d['estimated_generation'] for d in forecast_data[:3]]) / 3
         if next_3_gen < 500 and 8 <= datetime.now(EAT).hour <= 16:
             schedule_html += '<li style="margin-bottom:10px; color:#fd7e14"><strong>☁️ Cloud Warning:</strong><br>Low solar for next 3 hours.</li>'
-        
         schedule_html += '</ul>'
     
-    # 4. Chart Data Preparation
-    times = [t.strftime('%H:%M') for t, p in load_history]
-    l_vals = [p for t, p in load_history]
-    b_vals = [p for t, p in battery_history]
+    # 4. Chart Data Preparation (Downsampled for 2 Weeks)
+    # We take every 12th point (1 per hour) to keep the chart performant
+    downsample_rate = 12 
+    times = [t.strftime('%d %b %H:%M') for i, (t, p) in enumerate(load_history) if i % downsample_rate == 0]
+    l_vals = [p for i, (t, p) in enumerate(load_history) if i % downsample_rate == 0]
+    b_vals = [p for i, (t, p) in enumerate(battery_history) if i % downsample_rate == 0]
     
     pred = latest_data.get("battery_life_prediction")
     sim_t = ["Now"] + [d['time'].strftime('%H:%M') for d in latest_data.get("solar_forecast", [])]
@@ -669,26 +674,32 @@ def home():
         .card {{ background: rgba(255,255,255,0.95); padding: 20px; border-radius: 15px; margin-bottom: 20px; box-shadow: 0 4px 15px rgba(0,0,0,0.2); backdrop-filter: blur(5px); }}
         .header {{ text-align: center; color: white; text-shadow: 2px 2px 4px rgba(0,0,0,0.7); margin-bottom: 25px; }}
         
-        /* Power Flow Animation CSS */
-        .flow-container {{ display: grid; grid-template-columns: 1fr 1fr 1fr; grid-template-rows: auto auto; gap: 20px; text-align: center; align-items: center; justify-items: center; margin-bottom:20px; }}
-        .f-icon {{ font-size: 2.5em; background: white; padding: 15px; border-radius: 50%; box-shadow: 0 4px 10px rgba(0,0,0,0.1); width: 50px; height: 50px; display:flex; align-items:center; justify-content:center; position:relative; z-index:2; }}
-        .f-line-container {{ position: relative; width: 100%; height: 10px; background: #ddd; border-radius: 5px; z-index:1; }}
-        .f-dot {{ position: absolute; top: 0; left: 0; width: 10px; height: 10px; background: #28a745; border-radius: 50%; opacity: 0; }}
+        /* Power Flow Animation CSS - REDESIGNED HUB */
+        .flow-container {{ display: grid; grid-template-columns: 1fr 1fr 1fr; grid-template-rows: 80px 80px 80px; gap: 0px; text-align: center; align-items: center; justify-items: center; margin-bottom:20px; position:relative; }}
         
-        /* Grid Layout for Flow */
-        .area-sun {{ grid-column: 1; grid-row: 1; }}
-        .area-grid {{ grid-column: 3; grid-row: 1; }}
-        .area-inv {{ grid-column: 2; grid-row: 1; display:flex; flex-direction:column; align-items:center; }}
-        .area-bat {{ grid-column: 1; grid-row: 2; }}
-        .area-home {{ grid-column: 3; grid-row: 2; }}
+        .f-icon {{ font-size: 2em; background: white; padding: 10px; border-radius: 50%; box-shadow: 0 4px 10px rgba(0,0,0,0.1); width: 45px; height: 45px; display:flex; align-items:center; justify-content:center; position:relative; z-index:2; }}
+        .hub-box {{ width: 80px; height: 80px; background: #333; color: white; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 0.9em; box-shadow: 0 4px 15px rgba(0,0,0,0.3); z-index:5; }}
+        
+        .f-line-h {{ position: relative; width: 100%; height: 6px; background: #ddd; border-radius: 3px; z-index:1; }}
+        .f-line-v {{ position: relative; width: 6px; height: 100%; background: #ddd; border-radius: 3px; z-index:1; }}
+        
+        .f-dot {{ position: absolute; width: 10px; height: 10px; background: #28a745; border-radius: 50%; opacity: 0; }}
+        
+        /* Grid Placement */
+        .c-gen {{ grid-column: 2; grid-row: 1; display:flex; flex-direction:column; align-items:center; justify-content:flex-end; height:100%; width:100%; }}
+        .c-sun {{ grid-column: 1; grid-row: 2; display:flex; flex-direction:row; align-items:center; justify-content:flex-end; width:100%; }}
+        .c-hub {{ grid-column: 2; grid-row: 2; display:flex; align-items:center; justify-content:center; }}
+        .c-hse {{ grid-column: 3; grid-row: 2; display:flex; flex-direction:row; align-items:center; justify-content:flex-start; width:100%; }}
+        .c-bat {{ grid-column: 2; grid-row: 3; display:flex; flex-direction:column; align-items:center; justify-content:flex-start; height:100%; width:100%; }}
         
         /* Animations */
-        @keyframes flowRight {{ 0% {{ left: 0%; opacity:1; }} 100% {{ left: 95%; opacity:0; }} }}
-        @keyframes flowLeft {{ 0% {{ left: 95%; opacity:1; }} 100% {{ left: 0%; opacity:0; }} }}
+        @keyframes flowRight {{ 0% {{ left: 0%; opacity:1; }} 100% {{ left: 100%; opacity:0; }} }}
         @keyframes flowDown {{ 0% {{ top: 0%; opacity:1; }} 100% {{ top: 100%; opacity:0; }} }}
+        @keyframes flowUp {{ 0% {{ top: 100%; opacity:1; }} 100% {{ top: 0%; opacity:0; }} }}
         
         .flow-right {{ animation: flowRight infinite linear; }}
-        .flow-left {{ animation: flowLeft infinite linear; }}
+        .flow-down {{ animation: flowDown infinite linear; }}
+        .flow-up {{ animation: flowUp infinite linear; }}
         
         /* Status Cards */
         .status-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 15px; margin-bottom: 20px; }}
@@ -724,45 +735,54 @@ def home():
             <p>Solar Monitor • {latest_data.get('timestamp','Loading...')}</p>
         </div>
 
-        <!-- NEW: Animated Power Flow Diagram -->
+        <!-- NEW: Animated HUB Diagram -->
         <div class="card" style="background: rgba(255,255,255,0.9);">
             <div class="flow-container">
-                <!-- Sun -->
-                <div class="area-sun">
-                    <div class="f-icon">☀️</div>
-                    <div style="font-weight:bold; margin-top:5px;">{tot_sol:.0f}W</div>
-                </div>
                 
-                <!-- Center Hub (Lines) -->
-                <div class="area-inv" style="width:100%">
-                    <!-- Line Sun to House -->
-                    <div class="f-line-container" style="width:100%; margin-bottom:10px;">
-                        <div class="f-dot flow-right" style="animation-duration:{anim_s_h}"></div>
+                <!-- Generator (Top) -->
+                <div class="c-gen">
+                    <div class="f-icon" style="border: 2px solid {'#dc3545' if gen_on else '#ccc'}">🔌</div>
+                    <div class="f-line-v" style="height:40px;">
+                        <div class="f-dot flow-down" style="animation-duration:{anim_g_h}; background:#dc3545; display:{'block' if gen_on else 'none'}"></div>
                     </div>
                 </div>
 
-                <!-- House -->
-                <div class="area-grid">
-                    <div class="f-icon">🏠</div>
-                    <div style="font-weight:bold; margin-top:5px;">{tot_load:.0f}W</div>
-                </div>
-
-                <!-- Battery -->
-                <div class="area-bat" style="display:flex; align-items:center; gap:10px;">
-                    <div class="f-icon">🔋</div>
-                    <!-- Line Bat to/from -->
-                    <div class="f-line-container" style="width:100px;">
-                        <!-- Discharge to House (Left to Right visual in grid context, but lets simplify) -->
-                        <div class="f-dot {'flow-right' if flow_b_h > 0 else 'flow-left'}" style="animation-duration:{anim_b_h if flow_b_h > 0 else anim_s_b}"></div>
+                <!-- Sun (Left) -->
+                <div class="c-sun">
+                    <div style="text-align:right; margin-right:10px;">
+                        <div class="f-icon" style="color:#fd7e14">☀️</div>
+                        <div style="font-weight:bold; font-size:0.8em">{tot_sol:.0f}W</div>
                     </div>
-                    <div style="font-weight:bold;">{p_bat:.0f}%</div>
+                    <div class="f-line-h" style="width:60px;">
+                        <div class="f-dot flow-right" style="animation-duration:{anim_s_h}; display:{'block' if tot_sol > 10 else 'none'}"></div>
+                    </div>
                 </div>
                 
-                <!-- Generator/Grid -->
-                <div class="area-home">
-                    <div class="f-icon" style="color:{'#dc3545' if gen_on else '#ccc'}">⚙️</div>
-                     <div style="font-size:0.8em">{ 'GEN ON' if gen_on else 'OFF' }</div>
+                <!-- Hub (Center) -->
+                <div class="c-hub">
+                    <div class="hub-box">HUB</div>
                 </div>
+
+                <!-- House (Right) -->
+                <div class="c-hse">
+                    <div class="f-line-h" style="width:60px;">
+                        <div class="f-dot flow-right" style="animation-duration:{anim_load}; background:#007bff"></div>
+                    </div>
+                     <div style="text-align:left; margin-left:10px;">
+                        <div class="f-icon">🏠</div>
+                        <div style="font-weight:bold; font-size:0.8em">{tot_load:.0f}W</div>
+                    </div>
+                </div>
+
+                <!-- Battery (Bottom) -->
+                <div class="c-bat">
+                    <div class="f-line-v" style="height:40px;">
+                         <div class="f-dot {bat_anim_class}" style="animation-duration:{bat_anim_speed}; background:{bat_dot_color}; display:{'none' if 'stopped' in bat_anim_class else 'block'}"></div>
+                    </div>
+                    <div class="f-icon" style="color:{bat_dot_color}">🔋</div>
+                    <div style="font-weight:bold; font-size:0.8em">{p_bat:.0f}%</div>
+                </div>
+                
             </div>
         </div>
 
@@ -772,7 +792,7 @@ def home():
                 <div>{app_sub}</div>
             </div>
             
-            <!-- NEW: Smart Schedule Card -->
+            <!-- Smart Schedule Card -->
             <div class="st-card normal" style="background:#fff; color:#333; text-align:left; border-left: 5px solid #17a2b8;">
                 <div style="font-weight:bold; font-size:1.1em; margin-bottom:5px; border-bottom:1px solid #eee; padding-bottom:5px;">📅 Smart Schedule (Next 12h)</div>
                 {schedule_html}
@@ -828,7 +848,7 @@ def home():
         </div>
 
         <div class="card">
-            <h2 style="margin-top:0">Power History (12h)</h2>
+            <h2 style="margin-top:0">Power History (14 Days)</h2>
             <div style="height:250px"><canvas id="histChart"></canvas></div>
         </div>
 
@@ -903,8 +923,8 @@ def home():
             data: {{
                 labels: {json.dumps(times)},
                 datasets: [
-                    {{ label: 'Load', data: {json.dumps(l_vals)}, borderColor: '#007bff', backgroundColor: 'rgba(0,123,255,0.1)', fill: true, tension: 0.3 }},
-                    {{ label: 'Discharge', data: {json.dumps(b_vals)}, borderColor: '#dc3545', backgroundColor: 'rgba(220,53,69,0.1)', fill: true, tension: 0.3 }}
+                    {{ label: 'Load', data: {json.dumps(l_vals)}, borderColor: '#007bff', backgroundColor: 'rgba(0,123,255,0.1)', fill: true, tension: 0.3, pointRadius: 1 }},
+                    {{ label: 'Discharge', data: {json.dumps(b_vals)}, borderColor: '#dc3545', backgroundColor: 'rgba(220,53,69,0.1)', fill: true, tension: 0.3, pointRadius: 1 }}
                 ]
             }},
             options: {{ responsive: true, maintainAspectRatio: false }}
