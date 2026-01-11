@@ -79,9 +79,10 @@ last_communication = {}
 pool_pump_start_time = None
 pool_pump_last_alert = None
 
+# Historical Data & Forecast Containers
 solar_forecast = []
-solar_generation_pattern = deque(maxlen=48)
-load_demand_pattern = deque(maxlen=48)
+solar_generation_pattern = deque(maxlen=100) # Increased history size
+load_demand_pattern = deque(maxlen=100)      # Increased history size
 SOLAR_EFFICIENCY_FACTOR = 0.85
 FORECAST_HOURS = 12
 EAT = timezone(timedelta(hours=3))
@@ -274,6 +275,7 @@ def generate_load_forecast(pattern, current_avg=0):
         ft = now + timedelta(hours=i)
         h = ft.hour
         base = 1000
+        # Incorporate Historical Load Profile Data
         if pattern:
             match = next((l for ph, _, l in pattern if ph == h), None)
             if match is not None: base = match
@@ -466,6 +468,7 @@ def poll_growatt():
             battery_history.append((now, tot_bat))
             battery_history[:] = [(t, p) for t, p in battery_history if t >= (now - timedelta(hours=12))]
             
+            # Use Historical Patterns for Forecasting
             s_pat = analyze_historical_solar_pattern()
             l_pat = analyze_historical_load_pattern()
             s_cast = generate_solar_forecast(weather_forecast, s_pat)
@@ -546,7 +549,31 @@ def home():
     weather_bad = sol_cond and sol_cond['poor_conditions']
     surplus_power = tot_sol - tot_load
 
-    # 2. Status Logic
+    # Calculate Flow Speeds (for animation duration)
+    # Higher power = lower duration (faster)
+    def get_anim_speed(watts):
+        if watts < 100: return "1000s" # Stopped
+        if watts < 1000: return "3s"
+        if watts < 3000: return "1.5s"
+        return "0.8s"
+
+    # Determine Flow States
+    # Solar -> House: Always true if solar > 0 and load > 0 (simplified)
+    # Solar -> Battery: if Surplus > 0
+    # Battery -> House: if tot_dis > 0
+    # Grid -> House: if gen_on
+    
+    flow_s_h = min(tot_sol, tot_load) if tot_sol > 0 else 0
+    flow_s_b = max(0, surplus_power)
+    flow_b_h = tot_dis
+    flow_g_h = tot_load if gen_on else 0
+
+    anim_s_h = get_anim_speed(flow_s_h)
+    anim_s_b = get_anim_speed(flow_s_b)
+    anim_b_h = get_anim_speed(flow_b_h)
+    anim_g_h = get_anim_speed(flow_g_h)
+
+    # 2. Status Logic (Oven Safe / Warnings)
     if gen_on:
         app_st, app_sub, app_col = "CRITICAL: GENERATOR ON", "Stop all non-essential loads", "critical"
     elif b_active:
@@ -559,27 +586,55 @@ def home():
         reason = f"Surplus {surplus_power/1000:.1f}kW" if surplus_power > 3000 else "Battery Full & Sunny"
         app_st, app_sub, app_col = "✅ OVEN/KETTLE SAFE", reason, "good"
     
-    # LOGIC: Bad weather incoming + High Battery = Cook/Use Power Now
     elif weather_bad and p_bat > 80 and surplus_power > 0:
         app_st, app_sub, app_col = "⚡ COOK NOW", "Bad forecast ahead. Use power now.", "good"
-
-    # LOGIC: Bad Weather + Low Battery = Warning
     elif weather_bad:
         app_st, app_sub, app_col = "☁️ CONSERVE POWER", "Low Solar Forecast Expected", "warning"
-        
     elif surplus_power > 100:
         app_st, app_sub, app_col = "🔋 CHARGING", f"System recovering (+{surplus_power:.0f}W)", "normal"
     else:
         app_st, app_sub, app_col = "ℹ️ MONITOR USAGE", "System running normally", "normal"
         
-    net = tot_sol - tot_load
-    if net > 100: flow_txt, flow_col, flow_icn = f"Charging (+{net:.0f}W)", "#28a745", "⚡🔋"
-    elif net < -100: flow_txt, flow_col, flow_icn = f"Draining ({net:.0f}W)", "#dc3545", "🔋🔻"
-    else: flow_txt, flow_col, flow_icn = "Balanced", "#17a2b8", "⚖️"
-    
     w_bdg, w_cls = ("☁️ Low Solar Day", "poor") if weather_bad else ("☀️ High Solar Day", "good")
+
+    # 3. Smart Schedule Logic (Next 12h)
+    schedule_html = ""
+    forecast_data = latest_data.get('solar_forecast', [])
+    if forecast_data:
+        # Find best consecutive hours
+        best_start, best_end, current_run = None, None, 0
+        best_max_gen = 0
+        
+        for d in forecast_data:
+            gen = d['estimated_generation']
+            if gen > 2000: # 2kW threshold
+                if current_run == 0: temp_start = d['time']
+                current_run += 1
+                if gen > best_max_gen: best_max_gen = gen
+            else:
+                if current_run > 0:
+                    if best_start is None or current_run > (best_end.hour - best_start.hour):
+                        best_start = temp_start
+                        best_end = d['time']
+                    current_run = 0
+        
+        # Format the Schedule Card
+        schedule_html += '<ul style="padding-left:20px; margin:0;">'
+        if best_start:
+            s_str = best_start.strftime("%I %p").lstrip("0")
+            e_str = best_end.strftime("%I %p").lstrip("0")
+            schedule_html += f'<li style="margin-bottom:10px"><strong>🚿 Best Washing Time:</strong><br>{s_str} - {e_str} today.</li>'
+        else:
+            schedule_html += '<li style="margin-bottom:10px; color:#dc3545"><strong>⚠️ No High Solar Window:</strong><br>Avoid heavy loads today.</li>'
+            
+        # Check Next 3 Hours specifically
+        next_3_gen = sum([d['estimated_generation'] for d in forecast_data[:3]]) / 3
+        if next_3_gen < 500 and 8 <= datetime.now(EAT).hour <= 16:
+            schedule_html += '<li style="margin-bottom:10px; color:#fd7e14"><strong>☁️ Cloud Warning:</strong><br>Low solar for next 3 hours.</li>'
+        
+        schedule_html += '</ul>'
     
-    # 3. Chart Data Preparation
+    # 4. Chart Data Preparation
     times = [t.strftime('%H:%M') for t, p in load_history]
     l_vals = [p for t, p in load_history]
     b_vals = [p for t, p in battery_history]
@@ -587,17 +642,9 @@ def home():
     pred = latest_data.get("battery_life_prediction")
     sim_t = ["Now"] + [d['time'].strftime('%H:%M') for d in latest_data.get("solar_forecast", [])]
     trace_pct = []
-    pred_msg, pred_cls = "Analyzing...", "good"
     
     if pred:
         trace_pct = pred.get('trace_total_pct', [])
-        if pred.get('generator_needed'):
-            pred_msg = f"Gen Runtime: {pred.get('genset_hours', 0):.1f} Hours"
-            pred_cls = "critical"
-        elif pred.get('switchover_occurred'):
-            pred_msg, pred_cls = "Will switch to Backup", "warning"
-        else:
-            pred_msg, pred_cls = "Battery Sufficient", "good"
             
     # Load Speedometer Scale
     vis_max = 5000
@@ -607,7 +654,7 @@ def home():
     elif tot_load < 4500: l_col, l_msg = "#fd7e14", "High"
     else: l_col, l_msg = "#dc3545", "CRITICAL"
 
-    # 4. Generate HTML
+    # 5. Generate HTML
     html = f"""
 <!DOCTYPE html>
 <html>
@@ -622,6 +669,28 @@ def home():
         .card {{ background: rgba(255,255,255,0.95); padding: 20px; border-radius: 15px; margin-bottom: 20px; box-shadow: 0 4px 15px rgba(0,0,0,0.2); backdrop-filter: blur(5px); }}
         .header {{ text-align: center; color: white; text-shadow: 2px 2px 4px rgba(0,0,0,0.7); margin-bottom: 25px; }}
         
+        /* Power Flow Animation CSS */
+        .flow-container {{ display: grid; grid-template-columns: 1fr 1fr 1fr; grid-template-rows: auto auto; gap: 20px; text-align: center; align-items: center; justify-items: center; margin-bottom:20px; }}
+        .f-icon {{ font-size: 2.5em; background: white; padding: 15px; border-radius: 50%; box-shadow: 0 4px 10px rgba(0,0,0,0.1); width: 50px; height: 50px; display:flex; align-items:center; justify-content:center; position:relative; z-index:2; }}
+        .f-line-container {{ position: relative; width: 100%; height: 10px; background: #ddd; border-radius: 5px; z-index:1; }}
+        .f-dot {{ position: absolute; top: 0; left: 0; width: 10px; height: 10px; background: #28a745; border-radius: 50%; opacity: 0; }}
+        
+        /* Grid Layout for Flow */
+        .area-sun {{ grid-column: 1; grid-row: 1; }}
+        .area-grid {{ grid-column: 3; grid-row: 1; }}
+        .area-inv {{ grid-column: 2; grid-row: 1; display:flex; flex-direction:column; align-items:center; }}
+        .area-bat {{ grid-column: 1; grid-row: 2; }}
+        .area-home {{ grid-column: 3; grid-row: 2; }}
+        
+        /* Animations */
+        @keyframes flowRight {{ 0% {{ left: 0%; opacity:1; }} 100% {{ left: 95%; opacity:0; }} }}
+        @keyframes flowLeft {{ 0% {{ left: 95%; opacity:1; }} 100% {{ left: 0%; opacity:0; }} }}
+        @keyframes flowDown {{ 0% {{ top: 0%; opacity:1; }} 100% {{ top: 100%; opacity:0; }} }}
+        
+        .flow-right {{ animation: flowRight infinite linear; }}
+        .flow-left {{ animation: flowLeft infinite linear; }}
+        
+        /* Status Cards */
         .status-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 15px; margin-bottom: 20px; }}
         .st-card {{ padding: 20px; border-radius: 12px; color: white; text-align: center; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }}
         .st-card.critical {{ background: linear-gradient(135deg, #dc3545, #c82333); }}
@@ -655,18 +724,58 @@ def home():
             <p>Solar Monitor • {latest_data.get('timestamp','Loading...')}</p>
         </div>
 
+        <!-- NEW: Animated Power Flow Diagram -->
+        <div class="card" style="background: rgba(255,255,255,0.9);">
+            <div class="flow-container">
+                <!-- Sun -->
+                <div class="area-sun">
+                    <div class="f-icon">☀️</div>
+                    <div style="font-weight:bold; margin-top:5px;">{tot_sol:.0f}W</div>
+                </div>
+                
+                <!-- Center Hub (Lines) -->
+                <div class="area-inv" style="width:100%">
+                    <!-- Line Sun to House -->
+                    <div class="f-line-container" style="width:100%; margin-bottom:10px;">
+                        <div class="f-dot flow-right" style="animation-duration:{anim_s_h}"></div>
+                    </div>
+                </div>
+
+                <!-- House -->
+                <div class="area-grid">
+                    <div class="f-icon">🏠</div>
+                    <div style="font-weight:bold; margin-top:5px;">{tot_load:.0f}W</div>
+                </div>
+
+                <!-- Battery -->
+                <div class="area-bat" style="display:flex; align-items:center; gap:10px;">
+                    <div class="f-icon">🔋</div>
+                    <!-- Line Bat to/from -->
+                    <div class="f-line-container" style="width:100px;">
+                        <!-- Discharge to House (Left to Right visual in grid context, but lets simplify) -->
+                        <div class="f-dot {'flow-right' if flow_b_h > 0 else 'flow-left'}" style="animation-duration:{anim_b_h if flow_b_h > 0 else anim_s_b}"></div>
+                    </div>
+                    <div style="font-weight:bold;">{p_bat:.0f}%</div>
+                </div>
+                
+                <!-- Generator/Grid -->
+                <div class="area-home">
+                    <div class="f-icon" style="color:{'#dc3545' if gen_on else '#ccc'}">⚙️</div>
+                     <div style="font-size:0.8em">{ 'GEN ON' if gen_on else 'OFF' }</div>
+                </div>
+            </div>
+        </div>
+
         <div class="status-grid">
             <div class="st-card {app_col}">
                 <div class="st-val">{app_st}</div>
                 <div>{app_sub}</div>
             </div>
-            <div class="st-card {pred_cls}">
-                <div class="st-val">{pred_msg}</div>
-                <div>Based on current usage trend</div>
-            </div>
-            <div class="st-card normal" style="background:white; color:#333; border:2px solid {flow_col}">
-                <div class="st-val" style="color:{flow_col}">{flow_icn} {flow_txt}</div>
-                <div>Battery Flow</div>
+            
+            <!-- NEW: Smart Schedule Card -->
+            <div class="st-card normal" style="background:#fff; color:#333; text-align:left; border-left: 5px solid #17a2b8;">
+                <div style="font-weight:bold; font-size:1.1em; margin-bottom:5px; border-bottom:1px solid #eee; padding-bottom:5px;">📅 Smart Schedule (Next 12h)</div>
+                {schedule_html}
             </div>
         </div>
 
@@ -714,7 +823,7 @@ def home():
         </div>
 
         <div class="card">
-            <h2 style="margin-top:0">Total Fuel Prediction</h2>
+            <h2 style="margin-top:0">Total Fuel Prediction (Using Historical Load)</h2>
             <div style="height:300px"><canvas id="predChart"></canvas></div>
         </div>
 
