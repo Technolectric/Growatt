@@ -602,7 +602,7 @@ def home():
     else:
         app_st, app_sub, app_col = "ℹ️ MONITOR USAGE", "System running normally", "normal"
         
-    w_bdg, w_cls = ("☁️ Low Solar Day", "poor") if weather_bad else ("☀️ High Solar Day", "good")
+    w_bdg, w_cls = ("☁️ Low Solar Forecast", "poor") if weather_bad else ("☀️ High Solar Forecast", "good")
 
     # 3. Smart Schedule Logic
     schedule_html = ""
@@ -650,11 +650,15 @@ def home():
         l_vals = [tot_load]
         b_vals = [tot_dis]
     else:
-        # We take every 12th point (1 per hour) to keep the chart performant
-        downsample_rate = 12 
-        times = [t.strftime('%d %b %H:%M') for i, (t, p) in enumerate(load_history) if i % downsample_rate == 0]
-        l_vals = [p for i, (t, p) in enumerate(load_history) if i % downsample_rate == 0]
-        b_vals = [p for i, (t, p) in enumerate(battery_history) if i % downsample_rate == 0]
+        # Dynamic downsampling
+        total_points = len(load_history)
+        # Aim for roughly 150 points on the chart to keep it readable but detailed
+        # If we have few points (just started), step will be 1 (show all)
+        step = max(1, total_points // 150)
+        
+        times = [t.strftime('%d %b %H:%M') for i, (t, p) in enumerate(load_history) if i % step == 0]
+        l_vals = [p for i, (t, p) in enumerate(load_history) if i % step == 0]
+        b_vals = [p for i, (t, p) in enumerate(battery_history) if i % step == 0]
     
     pred = latest_data.get("battery_life_prediction")
     sim_t = ["Now"] + [d['time'].strftime('%H:%M') for d in latest_data.get("solar_forecast", [])]
@@ -686,24 +690,33 @@ def home():
         .card {{ background: rgba(255,255,255,0.95); padding: 20px; border-radius: 15px; margin-bottom: 20px; box-shadow: 0 4px 15px rgba(0,0,0,0.2); backdrop-filter: blur(5px); }}
         .header {{ text-align: center; color: white; text-shadow: 2px 2px 4px rgba(0,0,0,0.7); margin-bottom: 25px; }}
         
-        /* Power Flow Animation CSS - REDESIGNED HUB */
-        .flow-container {{ display: grid; grid-template-columns: 1fr 1fr 1fr; grid-template-rows: 80px 80px 80px; gap: 0px; text-align: center; align-items: center; justify-items: center; margin-bottom:20px; position:relative; }}
+        /* Power Flow Animation CSS - ABSOLUTE POSITIONING FIX */
+        .flow-container {{ 
+            position: relative; 
+            height: 220px; 
+            width: 100%;
+            max-width: 500px;
+            margin: 0 auto 20px auto;
+        }}
+
+        /* Icons */
+        .f-icon {{ font-size: 2em; background: white; padding: 10px; border-radius: 50%; box-shadow: 0 4px 10px rgba(0,0,0,0.1); width: 45px; height: 45px; display:flex; align-items:center; justify-content:center; position:relative; z-index:10; }}
+        .hub-box {{ width: 50px; height: 50px; background: white; color: #333; border-radius: 10px; display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 1.5em; box-shadow: 0 4px 15px rgba(0,0,0,0.3); z-index:10; border: 2px solid #333; }}
         
-        .f-icon {{ font-size: 2em; background: white; padding: 10px; border-radius: 50%; box-shadow: 0 4px 10px rgba(0,0,0,0.1); width: 45px; height: 45px; display:flex; align-items:center; justify-content:center; position:relative; z-index:2; }}
-        .hub-box {{ width: 50px; height: 50px; background: white; color: #333; border-radius: 10px; display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 1.5em; box-shadow: 0 4px 15px rgba(0,0,0,0.3); z-index:5; border: 2px solid #333; }}
-        
-        /* Connected Lines (Z-Index 1 to sit behind icons) */
-        .f-line-h {{ position: relative; width: 100%; height: 6px; background: #ddd; border-radius: 3px; z-index:1; }}
-        .f-line-v {{ position: relative; width: 6px; height: 100%; background: #ddd; border-radius: 3px; z-index:1; }}
+        /* Positioning Icons */
+        .pos-hub {{ position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); }}
+        .pos-sun {{ position: absolute; top: 50%; left: 0px; transform: translateY(-50%); display:flex; flex-direction:column; align-items:center; }}
+        .pos-house {{ position: absolute; top: 50%; right: 0px; transform: translateY(-50%); display:flex; flex-direction:column; align-items:center; }}
+        .pos-gen {{ position: absolute; top: 0px; left: 50%; transform: translateX(-50%); }}
+        .pos-bat {{ position: absolute; bottom: 0px; left: 50%; transform: translateX(-50%); display:flex; flex-direction:column; align-items:center; }}
+
+        /* Connecting Lines (Absolute behind icons) */
+        .line-h-left {{ position: absolute; top: 50%; left: 60px; right: 55%; height: 4px; background: #ddd; transform: translateY(-50%); z-index: 1; }}
+        .line-h-right {{ position: absolute; top: 50%; left: 55%; right: 60px; height: 4px; background: #ddd; transform: translateY(-50%); z-index: 1; }}
+        .line-v-top {{ position: absolute; top: 55px; left: 50%; bottom: 55%; width: 4px; background: #ddd; transform: translateX(-50%); z-index: 1; }}
+        .line-v-bottom {{ position: absolute; top: 55%; left: 50%; bottom: 65px; width: 4px; background: #ddd; transform: translateX(-50%); z-index: 1; }}
         
         .f-dot {{ position: absolute; width: 10px; height: 10px; background: #28a745; border-radius: 50%; opacity: 0; }}
-        
-        /* Grid Placement */
-        .c-gen {{ grid-column: 2; grid-row: 1; display:flex; flex-direction:column; align-items:center; justify-content:flex-end; height:100%; width:100%; }}
-        .c-sun {{ grid-column: 1; grid-row: 2; display:flex; flex-direction:row; align-items:center; justify-content:flex-end; width:100%; }}
-        .c-hub {{ grid-column: 2; grid-row: 2; display:flex; align-items:center; justify-content:center; }}
-        .c-hse {{ grid-column: 3; grid-row: 2; display:flex; flex-direction:row; align-items:center; justify-content:flex-start; width:100%; }}
-        .c-bat {{ grid-column: 2; grid-row: 3; display:flex; flex-direction:column; align-items:center; justify-content:flex-start; height:100%; width:100%; }}
         
         /* Animations */
         @keyframes flowRight {{ 0% {{ left: 0%; opacity:1; }} 100% {{ left: 100%; opacity:0; }} }}
@@ -748,52 +761,50 @@ def home():
             <p>Solar Monitor • {latest_data.get('timestamp','Loading...')}</p>
         </div>
 
-        <!-- NEW: Animated HUB Diagram -->
+        <!-- NEW: Animated HUB Diagram (Absolute Layout) -->
         <div class="card" style="background: rgba(255,255,255,0.9);">
             <div class="flow-container">
                 
+                <!-- Lines -->
+                <div class="line-v-top">
+                    <div class="f-dot flow-down" style="animation-duration:{anim_g_h}; background:#dc3545; display:{'block' if gen_on else 'none'}"></div>
+                </div>
+                <div class="line-h-left">
+                     <div class="f-dot flow-right" style="animation-duration:{anim_s_h}; display:{'block' if tot_sol > 10 else 'none'}"></div>
+                </div>
+                <div class="line-h-right">
+                    <div class="f-dot flow-right" style="animation-duration:{anim_load}; background:#007bff"></div>
+                </div>
+                <div class="line-v-bottom">
+                     <div class="f-dot {bat_anim_class}" style="animation-duration:{bat_anim_speed}; background:{bat_dot_color}; display:{'none' if 'stopped' in bat_anim_class else 'block'}"></div>
+                </div>
+
                 <!-- Generator (Top) -->
-                <div class="c-gen">
+                <div class="pos-gen">
                     <div class="f-icon" style="border: 2px solid {'#dc3545' if gen_on else '#ccc'}">🔌</div>
-                    <div class="f-line-v" style="height:40px;">
-                        <div class="f-dot flow-down" style="animation-duration:{anim_g_h}; background:#dc3545; display:{'block' if gen_on else 'none'}"></div>
-                    </div>
                 </div>
 
                 <!-- Sun (Left) -->
-                <div class="c-sun">
-                    <div style="text-align:right; margin-right:10px;">
-                        <div class="f-icon" style="color:#fd7e14">☀️</div>
-                        <div style="font-weight:bold; font-size:0.8em">{tot_sol:.0f}W</div>
-                    </div>
-                    <div class="f-line-h" style="width:60px;">
-                        <div class="f-dot flow-right" style="animation-duration:{anim_s_h}; display:{'block' if tot_sol > 10 else 'none'}"></div>
-                    </div>
+                <div class="pos-sun">
+                    <div class="f-icon" style="color:#fd7e14">☀️</div>
+                    <div style="font-weight:bold; font-size:0.8em; margin-top:5px;">{tot_sol:.0f}W</div>
                 </div>
                 
                 <!-- Hub (Center) -->
-                <div class="c-hub">
+                <div class="pos-hub">
                     <div class="hub-box">⚡</div>
                 </div>
 
                 <!-- House (Right) -->
-                <div class="c-hse">
-                    <div class="f-line-h" style="width:60px;">
-                        <div class="f-dot flow-right" style="animation-duration:{anim_load}; background:#007bff"></div>
-                    </div>
-                     <div style="text-align:left; margin-left:10px;">
-                        <div class="f-icon">🏠</div>
-                        <div style="font-weight:bold; font-size:0.8em">{tot_load:.0f}W</div>
-                    </div>
+                <div class="pos-house">
+                    <div class="f-icon">🏠</div>
+                    <div style="font-weight:bold; font-size:0.8em; margin-top:5px;">{tot_load:.0f}W</div>
                 </div>
 
                 <!-- Battery (Bottom) -->
-                <div class="c-bat">
-                    <div class="f-line-v" style="height:40px;">
-                         <div class="f-dot {bat_anim_class}" style="animation-duration:{bat_anim_speed}; background:{bat_dot_color}; display:{'none' if 'stopped' in bat_anim_class else 'block'}"></div>
-                    </div>
+                <div class="pos-bat">
                     <div class="f-icon" style="color:{bat_dot_color}">🔋</div>
-                    <div style="font-weight:bold; font-size:0.8em">{p_bat:.0f}%</div>
+                    <div style="font-weight:bold; font-size:0.8em; margin-top:5px;">{p_bat:.0f}%</div>
                 </div>
                 
             </div>
