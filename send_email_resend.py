@@ -75,6 +75,10 @@ solar_conditions_cache = None
 alert_history = []
 last_communication = {}
 
+# Pool Pump / High Load Tracking
+pool_pump_start_time = None
+pool_pump_last_alert = None
+
 solar_forecast = []
 solar_generation_pattern = deque(maxlen=48)
 load_demand_pattern = deque(maxlen=48)
@@ -397,6 +401,8 @@ def check_alerts(inv_data, solar, total_solar, bat_discharge, gen_run):
 # ----------------------------
 def poll_growatt():
     global latest_data, load_history, battery_history, weather_forecast, last_communication, solar_conditions_cache
+    global pool_pump_start_time, pool_pump_last_alert
+
     weather_forecast = get_weather_forecast()
     if weather_forecast: solar_conditions_cache = analyze_solar_conditions(weather_forecast)
     last_wx = datetime.now(EAT)
@@ -473,6 +479,32 @@ def poll_growatt():
             b_kwh = (b_pct / 100) * 21.0
             
             pred = calculate_battery_cascade(s_cast, l_cast, p_min, b_act)
+
+            # --- POOL PUMP / CONTINUOUS LOAD ALERT ---
+            # Check if it's after 4 PM (16:00)
+            if now.hour >= 16:
+                # If discharge is continuously > 1.1kW (1100W)
+                if tot_bat > 1100:
+                    if pool_pump_start_time is None:
+                        pool_pump_start_time = now
+                    
+                    # Calculate duration
+                    duration = now - pool_pump_start_time
+                    
+                    # If duration > 3 hours and time > 6 PM (18:00)
+                    if duration > timedelta(hours=3) and now.hour >= 18:
+                        # Check cooldown (send max once per hour)
+                        if pool_pump_last_alert is None or (now - pool_pump_last_alert) > timedelta(hours=1):
+                            send_email(
+                                "⚠️ HIGH LOAD ALERT: Pool Pumps?", 
+                                f"Battery discharge has been over 1.1kW for {duration.seconds//3600} hours. Did you leave the pool pumps on?", 
+                                "high_load_continuous"
+                            )
+                            pool_pump_last_alert = now
+                else:
+                    pool_pump_start_time = None
+            else:
+                pool_pump_start_time = None
             
             latest_data = {
                 "timestamp": now.strftime("%Y-%m-%d %H:%M:%S EAT"),
@@ -515,6 +547,11 @@ def home():
     b_pct = latest_data.get("backup_percent_calc", 0)
     b_kwh = latest_data.get("backup_kwh_calc", 0)
     
+    # Weather & Surplus Calculations
+    sol_cond = solar_conditions_cache
+    weather_bad = sol_cond and sol_cond['poor_conditions']
+    surplus_power = tot_sol - tot_load
+
     # 2. Status Logic
     if gen_on:
         app_st, app_sub, app_col = "CRITICAL: GENERATOR ON", "Stop all non-essential loads", "critical"
@@ -522,8 +559,21 @@ def home():
         app_st, app_sub, app_col = "❌ STOP HEAVY LOADS", "Backup Active. Save power.", "critical"
     elif p_bat < 45 and tot_sol < tot_load:
         app_st, app_sub, app_col = "⚠️ REDUCE LOADS", "Primary Low & Discharging", "warning"
-    elif tot_sol > (tot_load + 500):
-        app_st, app_sub, app_col = "✅ OVEN/KETTLE SAFE", "Solar covering consumption", "good"
+    
+    # LOGIC: Oven Safe if Bat > 75% AND Surplus > 3kW
+    elif p_bat > 75 and surplus_power > 3000:
+        app_st, app_sub, app_col = "✅ OVEN/KETTLE SAFE", f"Bat > 75% & Surplus {surplus_power/1000:.1f}kW", "good"
+    
+    # LOGIC: Bad weather incoming + High Battery = Cook/Use Power Now
+    elif weather_bad and p_bat > 80 and surplus_power > 0:
+        app_st, app_sub, app_col = "⚡ COOK NOW", "Bad forecast ahead. Use power now.", "good"
+
+    # LOGIC: Bad Weather + Low Battery = Warning
+    elif weather_bad:
+        app_st, app_sub, app_col = "☁️ CONSERVE POWER", "Low Solar Forecast Expected", "warning"
+        
+    elif surplus_power > 100:
+        app_st, app_sub, app_col = "🔋 CHARGING", f"System recovering (+{surplus_power:.0f}W)", "normal"
     else:
         app_st, app_sub, app_col = "ℹ️ MONITOR USAGE", "System running normally", "normal"
         
@@ -532,8 +582,7 @@ def home():
     elif net < -100: flow_txt, flow_col, flow_icn = f"Draining ({net:.0f}W)", "#dc3545", "🔋🔻"
     else: flow_txt, flow_col, flow_icn = "Balanced", "#17a2b8", "⚖️"
     
-    sol_cond = solar_conditions_cache
-    w_bdg, w_cls = ("☁️ Low Solar Day", "poor") if sol_cond and sol_cond['poor_conditions'] else ("☀️ High Solar Day", "good")
+    w_bdg, w_cls = ("☁️ Low Solar Day", "poor") if weather_bad else ("☀️ High Solar Day", "good")
     
     # 3. Chart Data Preparation
     times = [t.strftime('%H:%M') for t, p in load_history]
