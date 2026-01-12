@@ -1042,7 +1042,7 @@ def home():
         .text-danger { color: var(--danger); }
         .text-info { color: var(--info); }
         
-        /* Power Flow */
+        /* Power Flow - FIXED WITH CSS GRID */
         .power-flow-container {
             flex: 1;
             display: flex;
@@ -1056,6 +1056,13 @@ def home():
             width: 100%;
             max-width: 800px;
             aspect-ratio: 16/9;
+            /* Use CSS Grid for stable positioning */
+            display: grid;
+            grid-template-columns: 1fr auto 1fr;
+            grid-template-rows: 1fr auto 1fr;
+            align-items: center;
+            justify-items: center;
+            margin: 0 auto;
         }
         
         .flow-svg {
@@ -1063,10 +1070,10 @@ def home():
             width: 100%;
             height: 100%;
             top: 0; left: 0;
+            z-index: 1;
         }
         
         .flow-node {
-            position: absolute;
             display: flex;
             flex-direction: column;
             align-items: center;
@@ -1077,36 +1084,31 @@ def home():
             z-index: 10;
             box-shadow: var(--shadow-sm);
             transition: all var(--transition);
+            width: clamp(60px, 14vw, 90px);
+            height: clamp(60px, 14vw, 90px);
         }
         
+        /* Position nodes in the grid */
+        .flow-node.solar { grid-column: 1; grid-row: 2; }
+        .flow-node.inverter { grid-column: 2; grid-row: 2; }
+        .flow-node.load { grid-column: 3; grid-row: 2; }
+        .flow-node.battery { grid-column: 2; grid-row: 3; }
+        .flow-node.generator { grid-column: 2; grid-row: 1; }
+        
         .flow-node.inverter {
-            width: 20%; 
-            padding-bottom: 20%;
-            top: 50%; 
-            left: 50%; 
-            transform: translate(-50%, -50%);
+            width: clamp(70px, 18vw, 110px);
+            height: clamp(70px, 18vw, 110px);
             border-color: var(--info);
             box-shadow: var(--shadow-md);
         }
         
-        .flow-node:not(.inverter) { 
-            width: 14%; 
-            padding-bottom: 14%; 
-        }
-        
-        /* Node Positions */
-        .flow-node.solar { top: 50%; left: 8%; transform: translateY(-50%); }
-        .flow-node.load { top: 50%; right: 8%; transform: translateY(-50%); }
-        .flow-node.battery { bottom: 8%; left: 50%; transform: translateX(-50%); }
-        .flow-node.generator { top: 8%; left: 50%; transform: translateX(-50%); }
-        
         .flow-node-content {
-            position: absolute;
-            top: 0; left: 0; width: 100%; height: 100%;
             display: flex;
             flex-direction: column;
             align-items: center;
             justify-content: center;
+            width: 100%;
+            height: 100%;
         }
         
         .flow-icon { font-size: 1.5rem; margin-bottom: 2px; }
@@ -1344,11 +1346,15 @@ def home():
                 grid-template-columns: 1fr;
             }
             
-            .flow-node.solar { top: 15%; left: 50%; transform: translate(-50%, 0); }
-            .flow-node.generator { top: 5%; right: 10%; left: auto; transform: none; }
-            .flow-node.inverter { top: 40%; }
-            .flow-node.load { bottom: 15%; right: 50%; top: auto; transform: translateX(50%); }
-            .flow-node.battery { bottom: 5%; }
+            /* Removed old absolute positioning rules for flow nodes */
+            .flow-node {
+                width: clamp(50px, 16vw, 70px);
+                height: clamp(50px, 16vw, 70px);
+            }
+            .flow-node.inverter {
+                width: clamp(60px, 20vw, 85px);
+                height: clamp(60px, 20vw, 85px);
+            }
         }
         
         /* Focus styles for accessibility */
@@ -1472,7 +1478,7 @@ def home():
                             {% endif %}
                         </svg>
                         
-                        <!-- DOM Nodes overlaid -->
+                        <!-- DOM Nodes positioned with CSS Grid -->
                         <div class="flow-node solar"><div class="flow-node-content"><div class="flow-icon">☀️</div><div class="flow-label">Solar</div><div class="flow-value">{{ '%0.f'|format(tot_sol) }}W</div></div></div>
                         <div class="flow-node inverter"><div class="flow-node-content"><div class="flow-icon">⚡</div><div class="flow-label">Inverter</div><div class="flow-value">{{ inverter_temp }}°C</div></div></div>
                         <div class="flow-node load"><div class="flow-node-content"><div class="flow-icon">🏠</div><div class="flow-label">Load</div><div class="flow-value">{{ '%0.f'|format(tot_load) }}W</div></div></div>
@@ -1757,7 +1763,7 @@ def home():
         app_col=app_col,
         tot_load=tot_load,
         tot_sol=tot_sol,
-        tot_dis=tot_dis,  # <--- FIXED: Added this missing variable
+        tot_dis=tot_dis,
         p_bat=p_bat,
         b_volt=b_volt,
         b_pct=b_pct,
