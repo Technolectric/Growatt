@@ -178,7 +178,7 @@ def get_weather_from_7timer():
         base = datetime.now(EAT)
         for item in data.get('dataseries', [])[:48]:
             t = base + timedelta(hours=item.get('timepoint', 0))
-            times.append(t.strftime('%Y-%m-%dT%H:%M'))
+            times.append(t.strftime('%Y-%m-dT%H:%M'))
             c_pct = min((item.get('cloudcover', 5) * 12), 100)
             cloud.append(c_pct)
             solar.append(max(800 * (1 - c_pct/100), 0))
@@ -1478,51 +1478,51 @@ def home():
                                 </linearGradient>
                             </defs>
                             
-                            <!-- Solar to Inverter -->
-                            <path d="M 8 28.125 L 50 28.125" 
+                            <!-- Solar to Inverter - CORRECTED COORDINATES -->
+                            <path d="M 12 28.125 L 44 28.125" 
                                   stroke="{{ 'url(#solarGradient)' if solar_active else 'var(--border)' }}" 
                                   stroke-width="{{ solar_line_width if solar_active else 0.5 }}"
                                   filter="{{ 'url(#glow)' if solar_active else '' }}" />
                             {% if solar_active %}
                             <circle r="1" fill="var(--primary)">
-                                <animateMotion dur="{{ 3 - (tot_sol / 5000) }}s" repeatCount="indefinite" path="M 8 28.125 L 50 28.125" />
+                                <animateMotion dur="{{ 3 - (tot_sol / 5000) }}s" repeatCount="indefinite" path="M 12 28.125 L 44 28.125" />
                             </circle>
                             {% endif %}
                             
-                            <!-- Inverter to Load -->
-                            <path d="M 50 28.125 L 92 28.125" 
+                            <!-- Inverter to Load - CORRECTED COORDINATES -->
+                            <path d="M 56 28.125 L 88 28.125" 
                                   stroke="{{ 'url(#loadGradient)' if tot_load > 0 else 'var(--border)' }}" 
                                   stroke-width="{{ load_line_width if tot_load > 0 else 0.5 }}"
                                   filter="{{ 'url(#glow)' if tot_load > 0 else '' }}" />
                             {% if tot_load > 0 %}
                             <circle r="1" fill="var(--info)">
-                                <animateMotion dur="1.5s" repeatCount="indefinite" path="M 50 28.125 L 92 28.125" />
+                                <animateMotion dur="1.5s" repeatCount="indefinite" path="M 56 28.125 L 88 28.125" />
                             </circle>
                             {% endif %}
                             
-                            <!-- Battery to/from Inverter -->
-                            <path d="M 50 28.125 L 50 52" 
+                            <!-- Battery to/from Inverter - CORRECTED COORDINATES -->
+                            <path d="M 50 36 L 50 48" 
                                   stroke="{{ 'var(--primary)' if battery_charging else ('var(--danger)' if battery_discharging else 'var(--border)') }}" 
                                   stroke-width="{{ battery_line_width if (battery_charging or battery_discharging) else 0.5 }}"
                                   filter="{{ 'url(#glow)' if (battery_charging or battery_discharging) else '' }}" />
                             {% if battery_charging %}
                             <circle r="1" fill="var(--primary)">
-                                <animateMotion dur="2s" repeatCount="indefinite" path="M 50 28.125 L 50 52" />
+                                <animateMotion dur="2s" repeatCount="indefinite" path="M 50 36 L 50 48" />
                             </circle>
                             {% elif battery_discharging %}
                             <circle r="1" fill="var(--danger)">
-                                <animateMotion dur="2s" repeatCount="indefinite" path="M 50 52 L 50 28.125" />
+                                <animateMotion dur="2s" repeatCount="indefinite" path="M 50 48 L 50 36" />
                             </circle>
                             {% endif %}
                             
-                            <!-- Generator to Inverter -->
-                            <path d="M 50 4 L 50 28.125" 
+                            <!-- Generator to Inverter - CORRECTED COORDINATES -->
+                            <path d="M 50 8 L 50 20" 
                                   stroke="{{ 'var(--danger)' if gen_on else 'var(--border)' }}" 
                                   stroke-width="{{ '4' if gen_on else '0.5' }}"
                                   filter="{{ 'url(#glow)' if gen_on else '' }}" />
                             {% if gen_on %}
                             <circle r="1" fill="var(--danger)">
-                                <animateMotion dur="1s" repeatCount="indefinite" path="M 50 4 L 50 28.125" />
+                                <animateMotion dur="1s" repeatCount="indefinite" path="M 50 8 L 50 20" />
                             </circle>
                             {% endif %}
                         </svg>
