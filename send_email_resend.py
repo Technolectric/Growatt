@@ -1,3 +1,5 @@
+--- START OF FILE text/x-python ---
+
 import os
 import time
 import requests
@@ -1757,6 +1759,7 @@ def home():
         app_col=app_col,
         tot_load=tot_load,
         tot_sol=tot_sol,
+        tot_dis=tot_dis,  # <--- FIXED: Added this missing variable
         p_bat=p_bat,
         b_volt=b_volt,
         b_pct=b_pct,
