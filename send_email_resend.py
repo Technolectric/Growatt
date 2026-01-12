@@ -708,7 +708,7 @@ def home():
                 forecast_solar.append(0)
             forecast_load.append(1200)
 
-    # Power flow states
+    # Power flow states - determine which icons should pulse
     solar_active = tot_sol > 100
     battery_charging = surplus_power > 100
     battery_discharging = tot_dis > 100
@@ -743,7 +743,7 @@ def home():
     alerts = [{"time": a['timestamp'].strftime("%H:%M"), "subject": a['subject'], "type": a['type']} 
               for a in reversed(alert_history[-10:])]
     
-    # Smart Recommendations
+    # Smart Recommendations - UPDATED LOGIC: only recommend heavy loads when primary battery > 75%
     recommendation_items = []
     
     safe_statuses = ["USE POWER NOW", "HIGH SURPLUS", "BATTERY FULL", "SOLAR POWERING"]
@@ -763,11 +763,11 @@ def home():
             'description': 'Backup battery active - essential loads only',
             'class': 'warning'
         })
-    elif is_safe_now:
+    elif is_safe_now and p_bat > 75:  # Only recommend heavy loads when primary battery > 75%
         recommendation_items.append({
             'icon': '✅',
             'title': 'SAFE TO USE HEAVY LOADS',
-            'description': f'Battery: {usable["total_pct"]:.0f}% | Solar: {tot_sol:.0f}W | Surplus: {surplus_power:.0f}W',
+            'description': f'Primary battery: {p_bat:.0f}% (>75%) | Surplus: {surplus_power:.0f}W',
             'class': 'good'
         })
     elif usable['total_pct'] < 50 and tot_sol < tot_load:
@@ -775,6 +775,13 @@ def home():
             'icon': '⚠️',
             'title': 'CONSERVE POWER',
             'description': f'Battery low ({usable["total_pct"]:.0f}%) and not charging well',
+            'class': 'warning'
+        })
+    elif p_bat <= 75 and is_safe_now:
+        recommendation_items.append({
+            'icon': '⚠️',
+            'title': 'LIMIT HEAVY LOADS',
+            'description': f'Primary battery {p_bat:.0f}% (≤75%) - use moderate loads only',
             'class': 'warning'
         })
     else:
@@ -1042,7 +1049,7 @@ def home():
         .text-danger { color: var(--danger); }
         .text-info { color: var(--info); }
         
-        /* Power Flow - UPDATED: Hidden lines with contained animation dots */
+        /* Power Flow - UPDATED: No lines, circles pulse when active */
         .power-flow-container {
             flex: 1;
             display: flex;
@@ -1066,61 +1073,9 @@ def home():
             margin: 0 auto;
         }
         
+        /* Hide SVG entirely since we don't need lines */
         .flow-svg {
-            position: absolute;
-            width: 100%;
-            height: 100%;
-            top: 0; 
-            left: 0;
-            z-index: 1;
-            pointer-events: none;
-        }
-        
-        /* Hide all connecting lines */
-        .flow-svg path {
-            stroke-width: 0 !important;
-            opacity: 0 !important;
-        }
-        
-        /* Keep animation dots but contain them within icons */
-        .flow-svg circle {
-            transform-box: fill-box;
-            transform-origin: center;
-            animation: pulse-dot 2s infinite;
-            r: 2;
-            fill: var(--info);
-        }
-        
-        @keyframes pulse-dot {
-            0%, 100% { 
-                transform: scale(1);
-                opacity: 0.7;
-            }
-            50% { 
-                transform: scale(1.3);
-                opacity: 1;
-            }
-        }
-        
-        /* Position animation dots within each icon */
-        .flow-svg circle:nth-child(2) { /* Solar dot */
-            cx: 28;
-            cy: 28.125;
-        }
-        
-        .flow-svg circle:nth-child(3) { /* Load dot */
-            cx: 72;
-            cy: 28.125;
-        }
-        
-        .flow-svg circle:nth-child(4) { /* Battery dot */
-            cx: 50;
-            cy: 42;
-        }
-        
-        .flow-svg circle:nth-child(5) { /* Generator dot */
-            cx: 50;
-            cy: 14;
+            display: none;
         }
         
         .flow-node {
@@ -1139,7 +1094,35 @@ def home():
             position: relative;
         }
         
-        /* Position nodes in the grid with proper alignment - Maintaining hub layout */
+        /* NEW: Circle around icons that pulses when transmitting/receiving power */
+        .flow-node::before {
+            content: '';
+            position: absolute;
+            top: -4px;
+            left: -4px;
+            right: -4px;
+            bottom: -4px;
+            border: 2px solid transparent;
+            border-radius: 50%;
+            z-index: -1;
+            opacity: 0;
+        }
+        
+        /* Pulse animation for active nodes */
+        @keyframes pulse-active {
+            0%, 100% { 
+                transform: scale(1);
+                opacity: 0.7;
+                box-shadow: 0 0 0 0 rgba(var(--pulse-color-rgb), 0.7);
+            }
+            50% { 
+                transform: scale(1.05);
+                opacity: 1;
+                box-shadow: 0 0 0 4px rgba(var(--pulse-color-rgb), 0);
+            }
+        }
+        
+        /* Position nodes in the grid with proper alignment */
         .flow-node.solar { 
             grid-column: 1; 
             grid-row: 2;
@@ -1444,12 +1427,6 @@ def home():
                 width: clamp(60px, 20vw, 85px);
                 height: clamp(60px, 20vw, 85px);
             }
-            
-            /* Adjust animation dot positions for mobile */
-            .flow-svg circle:nth-child(2) { cx: 26; }
-            .flow-svg circle:nth-child(3) { cx: 74; }
-            .flow-svg circle:nth-child(4) { cy: 40; }
-            .flow-svg circle:nth-child(5) { cy: 16; }
         }
         
         /* Focus styles for accessibility */
@@ -1499,62 +1476,21 @@ def home():
                 <div style="font-size: 0.85rem; color: var(--text-muted)">Status: {{ b_stat }}</div>
             </div>
             
-            <!-- Power Flow Diagram (Larger - span-9) -->
+            <!-- Power Flow Diagram (Larger - span-9) - UPDATED TITLE -->
             <div class="card span-9">
-                <h2>⚡ Real-Time Energy Flow</h2>
+                <h2>⚡ Real-Time Energy</h2>
                 <div class="power-flow-container">
                     <div class="power-flow">
                         <svg class="flow-svg" viewBox="0 0 100 56.25" preserveAspectRatio="xMidYMid meet">
-                            <!-- Solar to Inverter (lines hidden) -->
-                            <defs>
-                                <filter id="glow">
-                                    <feGaussianBlur stdDeviation="2" result="coloredBlur"/>
-                                    <feMerge>
-                                        <feMergeNode in="coloredBlur"/>
-                                        <feMergeNode in="SourceGraphic"/>
-                                    </feMerge>
-                                </filter>
-                            </defs>
-                            
-                            <!-- Solar to Inverter - LINE HIDDEN -->
-                            <path d="M 12 28.125 L 44 28.125" 
-                                  stroke="transparent" 
-                                  stroke-width="0"/>
-                            
-                            <!-- Solar animation dot (contained within solar icon) -->
-                            <circle cx="28" cy="28.125" r="2" fill="var(--info)"/>
-                            
-                            <!-- Inverter to Load - LINE HIDDEN -->
-                            <path d="M 56 28.125 L 88 28.125" 
-                                  stroke="transparent" 
-                                  stroke-width="0"/>
-                            
-                            <!-- Load animation dot (contained within load icon) -->
-                            <circle cx="72" cy="28.125" r="2" fill="var(--info)"/>
-                            
-                            <!-- Battery to/from Inverter - LINE HIDDEN -->
-                            <path d="M 50 36 L 50 48" 
-                                  stroke="transparent" 
-                                  stroke-width="0"/>
-                            
-                            <!-- Battery animation dot (contained within battery icon) -->
-                            <circle cx="50" cy="42" r="2" fill="var(--info)"/>
-                            
-                            <!-- Generator to Inverter - LINE HIDDEN -->
-                            <path d="M 50 8 L 50 20" 
-                                  stroke="transparent" 
-                                  stroke-width="0"/>
-                            
-                            <!-- Generator animation dot (contained within generator icon) -->
-                            <circle cx="50" cy="14" r="2" fill="var(--info)"/>
+                            <!-- SVG hidden completely -->
                         </svg>
                         
                         <!-- DOM Nodes positioned with CSS Grid - Hub layout maintained -->
-                        <div class="flow-node solar"><div class="flow-node-content"><div class="flow-icon">☀️</div><div class="flow-label">Solar</div><div class="flow-value">{{ '%0.f'|format(tot_sol) }}W</div></div></div>
-                        <div class="flow-node inverter"><div class="flow-node-content"><div class="flow-icon">⚡</div><div class="flow-label">Inverter</div><div class="flow-value">{{ inverter_temp }}°C</div></div></div>
-                        <div class="flow-node load"><div class="flow-node-content"><div class="flow-icon">🏠</div><div class="flow-label">Load</div><div class="flow-value">{{ '%0.f'|format(tot_load) }}W</div></div></div>
-                        <div class="flow-node battery"><div class="flow-node-content"><div class="flow-icon">🔋</div><div class="flow-label">Bat</div><div class="flow-value">{{ '%0.f'|format(usable.total_pct) }}%</div></div></div>
-                        <div class="flow-node generator"><div class="flow-node-content"><div class="flow-icon">{{ '⚠️' if gen_on else '🔌' }}</div><div class="flow-label">Gen</div><div class="flow-value">{{ 'ON' if gen_on else 'OFF' }}</div></div></div>
+                        <div class="flow-node solar" id="solar-node"><div class="flow-node-content"><div class="flow-icon">☀️</div><div class="flow-label">Solar</div><div class="flow-value">{{ '%0.f'|format(tot_sol) }}W</div></div></div>
+                        <div class="flow-node inverter" id="inverter-node"><div class="flow-node-content"><div class="flow-icon">⚡</div><div class="flow-label">Inverter</div><div class="flow-value">{{ inverter_temp }}°C</div></div></div>
+                        <div class="flow-node load" id="load-node"><div class="flow-node-content"><div class="flow-icon">🏠</div><div class="flow-label">Load</div><div class="flow-value">{{ '%0.f'|format(tot_load) }}W</div></div></div>
+                        <div class="flow-node battery" id="battery-node"><div class="flow-node-content"><div class="flow-icon">🔋</div><div class="flow-label">Bat</div><div class="flow-value">{{ '%0.f'|format(usable.total_pct) }}%</div></div></div>
+                        <div class="flow-node generator" id="generator-node"><div class="flow-node-content"><div class="flow-icon">{{ '⚠️' if gen_on else '🔌' }}</div><div class="flow-label">Gen</div><div class="flow-value">{{ 'ON' if gen_on else 'OFF' }}</div></div></div>
                     </div>
                 </div>
             </div>
@@ -1812,6 +1748,67 @@ def home():
             },
             options: commonOptions
         });
+        
+        // NEW: Dynamic pulse animation for active nodes
+        function updatePulseAnimations() {
+            const solarActive = {{ 'true' if solar_active else 'false' }};
+            const batteryCharging = {{ 'true' if battery_charging else 'false' }};
+            const batteryDischarging = {{ 'true' if battery_discharging else 'false' }};
+            const generatorActive = {{ 'true' if gen_on else 'false' }};
+            const backupActive = {{ 'true' if b_active else 'false' }};
+            
+            // Clear any existing styles
+            document.querySelectorAll('.flow-node').forEach(node => {
+                node.style.animation = 'none';
+                node.style.borderColor = '';
+                node.style.boxShadow = '';
+            });
+            
+            // Solar node pulses when generating power
+            if (solarActive) {
+                const solarNode = document.getElementById('solar-node');
+                solarNode.style.animation = 'pulse-active 1.5s infinite';
+                solarNode.style.borderColor = '#f0883e'; // Orange for solar
+                solarNode.style.setProperty('--pulse-color-rgb', '240, 136, 62');
+            }
+            
+            // Battery node pulses when charging or discharging
+            if (batteryCharging || batteryDischarging) {
+                const batteryNode = document.getElementById('battery-node');
+                batteryNode.style.animation = 'pulse-active 1.5s infinite';
+                batteryNode.style.borderColor = batteryCharging ? '#3fb950' : '#f85149'; // Green for charging, red for discharging
+                batteryNode.style.setProperty('--pulse-color-rgb', batteryCharging ? '63, 185, 80' : '248, 81, 73');
+            }
+            
+            // Load node pulses when load is high
+            const loadPower = {{ tot_load }};
+            if (loadPower > 2000) {
+                const loadNode = document.getElementById('load-node');
+                loadNode.style.animation = 'pulse-active 2s infinite';
+                loadNode.style.borderColor = '#58a6ff'; // Blue for load
+                loadNode.style.setProperty('--pulse-color-rgb', '88, 166, 255');
+            }
+            
+            // Generator node pulses when active
+            if (generatorActive) {
+                const genNode = document.getElementById('generator-node');
+                genNode.style.animation = 'pulse-active 1s infinite';
+                genNode.style.borderColor = '#f85149'; // Red for generator
+                genNode.style.setProperty('--pulse-color-rgb', '248, 81, 73');
+            }
+            
+            // Inverter node pulses when backup is active or temperature is high
+            const inverterTemp = {{ inverter_temp }};
+            if (backupActive || inverterTemp > 60) {
+                const inverterNode = document.getElementById('inverter-node');
+                inverterNode.style.animation = 'pulse-active 1.5s infinite';
+                inverterNode.style.borderColor = backupActive ? '#f0883e' : '#f85149';
+                inverterNode.style.setProperty('--pulse-color-rgb', backupActive ? '240, 136, 62' : '248, 81, 73');
+            }
+        }
+        
+        // Initialize pulse animations
+        setTimeout(updatePulseAnimations, 100);
         
         // Auto Refresh
         setInterval(() => {
