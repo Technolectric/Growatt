@@ -322,28 +322,36 @@ def calculate_moving_average_load(mins=45):
     return sum(recent) / len(recent) if recent else 0
 
 def generate_load_forecast(pattern, current_avg=0):
+    """Generate load forecast with proper fallback to time-based averages"""
     forecast = []
     now = datetime.now(EAT)
+    
     for i in range(FORECAST_HOURS):
         ft = now + timedelta(hours=i)
         h = ft.hour
-        base = 1000
+        
+        # Start with time-based defaults
+        if 0 <= h < 5: base = 600
+        elif 5 <= h < 8: base = 1800
+        elif 8 <= h < 17: base = 1200
+        elif 17 <= h < 22: base = 2800
+        else: base = 1000
+        
+        # Override with historical pattern if available
         if pattern:
             match = next((l for ph, _, l in pattern if ph == h), None)
             if match is not None: base = match
-        else:
-            if 0 <= h < 5: base = 600
-            elif 5 <= h < 8: base = 1800
-            elif 8 <= h < 17: base = 1200
-            elif 17 <= h < 22: base = 2800
         
         is_spike = current_avg > (base * 1.5)
+        
         if current_avg > 0:
             if i == 0: val = (current_avg * 0.8) + (base * 0.2)
             elif i == 1: val = (current_avg * 0.3) + (base * 0.7) if is_spike else (current_avg * 0.5) + (base * 0.5)
             elif i == 2: val = base if is_spike else (current_avg * 0.2) + (base * 0.8)
             else: val = base
-        else: val = base
+        else: 
+            val = base
+            
         forecast.append({'time': ft, 'hour': h, 'estimated_load': val})
     return forecast
 
