@@ -49,6 +49,7 @@ COMMUNICATION_TIMEOUT_MINUTES = 10
 PRIMARY_BATTERY_CAPACITY_WH = 30000 
 PRIMARY_DAILY_MIN_PCT = 40 
 BACKUP_BATTERY_DEGRADED_WH = 21000   
+BACKUP_DEGRADATION = 0.70  # 70% State of Health
 BACKUP_CUTOFF_PCT = 20
 TOTAL_SYSTEM_USABLE_WH = 34800 
 
@@ -76,13 +77,19 @@ latest_data = {
     "backup_voltage_status": "Unknown",
     "backup_active": False,
     "backup_percent_calc": 0,
-    "backup_kwh_calc": 0,
     "generator_running": False,
     "inverters": [],
     "solar_forecast": [],
     "load_forecast": [],
     "battery_life_prediction": None,
-    "weather_source": "Initializing..."
+    "weather_source": "Initializing...",
+    "usable_energy": {
+        "primary_kwh": 0,
+        "backup_kwh": 0,
+        "total_kwh": 0,
+        "total_pct": 0,
+        "total_usable_capacity": 29.76
+    }
 }
 load_history = []
 battery_history = []
@@ -101,6 +108,39 @@ load_demand_pattern = deque(maxlen=5000)
 SOLAR_EFFICIENCY_FACTOR = 0.85
 FORECAST_HOURS = 12
 EAT = timezone(timedelta(hours=3))
+
+# ----------------------------
+# Battery Calculation Function
+# ----------------------------
+def calculate_usable_energy(primary_pct, backup_pct):
+    """Calculate actual usable energy considering cutoffs and degradation"""
+    
+    # Primary battery - usable down to 40% (switchover point)
+    primary_available_wh = max(0, ((primary_pct - 40) / 100) * PRIMARY_BATTERY_CAPACITY_WH)
+    primary_available_kwh = primary_available_wh / 1000
+    
+    # Backup battery - degraded to 70% SoH, usable down to 20%
+    backup_actual_capacity_wh = BACKUP_BATTERY_DEGRADED_WH * BACKUP_DEGRADATION  # 14700 Wh
+    backup_available_wh = max(0, ((backup_pct - 20) / 100) * backup_actual_capacity_wh)
+    backup_available_kwh = backup_available_wh / 1000
+    
+    # Total available
+    total_available_kwh = primary_available_kwh + backup_available_kwh
+    
+    # Total usable capacity (60% of primary + 80% of degraded backup)
+    total_usable_capacity_wh = (PRIMARY_BATTERY_CAPACITY_WH * 0.6) + (backup_actual_capacity_wh * 0.8)
+    total_usable_capacity_kwh = total_usable_capacity_wh / 1000  # 29.76 kWh
+    
+    # Percentage of usable capacity
+    total_available_pct = (total_available_kwh / total_usable_capacity_kwh) * 100 if total_usable_capacity_kwh > 0 else 0
+    
+    return {
+        'primary_kwh': round(primary_available_kwh, 1),
+        'backup_kwh': round(backup_available_kwh, 1),
+        'total_kwh': round(total_available_kwh, 1),
+        'total_pct': round(total_available_pct, 1),
+        'total_usable_capacity': round(total_usable_capacity_kwh, 1)
+    }
 
 # ----------------------------
 # Weather Functions
@@ -487,7 +527,9 @@ def poll_growatt():
             b_volts = b_data['vBat'] if b_data else 0
             b_act = b_data['OutputPower'] > 50 if b_data else False
             b_pct = max(0, min(100, (b_volts - 51.0) / 2.0 * 100))
-            b_kwh = (b_pct / 100) * 21.0
+            
+            # Calculate usable energy with correct logic
+            usable = calculate_usable_energy(p_min, b_pct)
             
             pred = calculate_battery_cascade(s_cast, l_cast, p_min, b_act)
 
@@ -520,16 +562,16 @@ def poll_growatt():
                 "backup_voltage_status": get_backup_voltage_status(b_volts)[0],
                 "backup_active": b_act,
                 "backup_percent_calc": b_pct,
-                "backup_kwh_calc": b_kwh,
                 "generator_running": gen_on,
                 "inverters": inv_data,
                 "solar_forecast": s_cast,
                 "load_forecast": l_cast,
                 "battery_life_prediction": pred,
-                "weather_source": weather_source
+                "weather_source": weather_source,
+                "usable_energy": usable
             }
             
-            print(f"{latest_data['timestamp']} | Load={tot_out:.0f}W | Solar={tot_sol:.0f}W")
+            print(f"{latest_data['timestamp']} | Load={tot_out:.0f}W | Solar={tot_sol:.0f}W | Battery={usable['total_pct']:.0f}%")
             check_alerts(inv_data, solar_conditions_cache, tot_sol, tot_bat, gen_on)
         except Exception as e: print(f"Error in polling: {e}")
         time.sleep(POLL_INTERVAL_MINUTES * 60)
@@ -556,6 +598,7 @@ def api_data():
         "generator_running": latest_data.get("generator_running", False),
         "backup_active": latest_data.get("backup_active", False),
         "inverters": latest_data.get("inverters", []),
+        "usable_energy": latest_data.get("usable_energy", {}),
         "alerts": [{"time": a['timestamp'].strftime("%H:%M"), "subject": a['subject'], "type": a['type']} for a in alert_history[-10:]]
     })
 
@@ -581,9 +624,16 @@ def home():
     tot_sol = _num(latest_data.get("total_solar_input_W", 0))
     tot_dis = _num(latest_data.get("total_battery_discharge_W", 0))
     
-    p_kwh = (p_bat / 100.0) * 30.0
+    # Get corrected usable energy
+    usable = latest_data.get("usable_energy", {
+        "primary_kwh": 0,
+        "backup_kwh": 0,
+        "total_kwh": 0,
+        "total_pct": 0,
+        "total_usable_capacity": 29.76
+    })
+    
     b_pct = _num(latest_data.get("backup_percent_calc", 0))
-    b_kwh = _num(latest_data.get("backup_kwh_calc", 0))
     
     sol_cond = solar_conditions_cache
     weather_bad = sol_cond and sol_cond['poor_conditions']
@@ -599,19 +649,19 @@ def home():
     elif p_bat < 45 and tot_sol < tot_load:
         app_st, app_sub, app_col = "⚠️ REDUCE LOADS", "Battery low & discharging", "warning"
         status_icon = "⚠️"
-    elif p_bat > 95:
+    elif usable['total_pct'] > 95:
         app_st, app_sub, app_col = "✅ BATTERY FULL", "System fully charged", "good"
         status_icon = "🔋"
     elif tot_sol > 2000 and (tot_sol > tot_load * 0.9):
         app_st, app_sub, app_col = "✅ SOLAR POWERING", "Solar covering loads", "good"
         status_icon = "☀️"
-    elif (p_bat > 75 and surplus_power > 3000):
+    elif (usable['total_pct'] > 75 and surplus_power > 3000):
         app_st, app_sub, app_col = "✅ HIGH SURPLUS", f"Heavy loads safe", "good"
         status_icon = "⚡"
-    elif weather_bad and p_bat > 80:
+    elif weather_bad and usable['total_pct'] > 80:
         app_st, app_sub, app_col = "⚡ USE POWER NOW", "Poor forecast - cook now", "good"
         status_icon = "⚡"
-    elif weather_bad and p_bat < 70:
+    elif weather_bad and usable['total_pct'] < 70:
         app_st, app_sub, app_col = "☁️ CONSERVE POWER", "Low solar expected", "warning"
         status_icon = "☁️"
     elif surplus_power > 100:
@@ -663,6 +713,11 @@ def home():
     battery_charging = surplus_power > 100
     battery_discharging = tot_dis > 100
     
+    # Calculate line widths for power flow (proportional to power)
+    solar_line_width = max(2, min(8, tot_sol / 1000))
+    load_line_width = max(2, min(8, tot_load / 1000))
+    battery_line_width = max(2, min(8, tot_dis / 1000))
+    
     # Inverter temperature
     inverter_temps = [inv.get('temperature', 0) for inv in latest_data.get('inverters', [])]
     inverter_temp = f"{(sum(inverter_temps) / len(inverter_temps)):.0f}" if inverter_temps else "0"
@@ -670,17 +725,20 @@ def home():
     # Trends
     load_trend_icon = "↑" if tot_load > 2000 else "→" if tot_load > 1000 else "↓"
     load_trend_text = "High" if tot_load > 2000 else "Moderate" if tot_load > 1000 else "Low"
-    load_trend_class = "trend-up" if tot_load > 2000 else "trend-down" if tot_load < 1000 else ""
     
     solar_trend_icon = "☀️" if tot_sol > 5000 else "⛅" if tot_sol > 2000 else "☁️"
     solar_trend_text = "Excellent" if tot_sol > 5000 else "Good" if tot_sol > 2000 else "Low"
-    solar_trend_class = "trend-up" if tot_sol > 2000 else "trend-down"
     
     primary_color = "text-success" if p_bat > 60 else "text-warning" if p_bat > 40 else "text-danger"
     backup_color = "text-success" if b_volt > 52.3 else "text-warning" if b_volt > 51.5 else "text-danger"
     
-    primary_battery_class = "" if p_bat > 60 else "warning" if p_bat > 40 else "critical"
-    backup_battery_class = "" if b_pct > 60 else "warning" if b_pct > 40 else "critical"
+    # Battery bar color based on usable percentage
+    if usable['total_pct'] >= 60:
+        battery_bar_color = "success"
+    elif usable['total_pct'] >= 25:
+        battery_bar_color = "warning"
+    else:
+        battery_bar_color = "danger"
     
     alerts = [{"time": a['timestamp'].strftime("%H:%M"), "subject": a['subject'], "type": a['type']} 
               for a in reversed(alert_history[-10:])]
@@ -696,12 +754,6 @@ def home():
             'icon': '🚨',
             'title': 'NO HEAVY LOADS',
             'description': 'Generator running - turn off all non-essential appliances',
-            'appliances': [
-                {'name': 'Oven', 'status': '❌', 'class': 'danger'},
-                {'name': 'Kettle', 'status': '❌', 'class': 'danger'},
-                {'name': 'Washing Machine', 'status': '❌', 'class': 'danger'},
-                {'name': 'Pool Pumps', 'status': '❌', 'class': 'danger'}
-            ],
             'class': 'critical'
         })
     elif b_active:
@@ -709,38 +761,20 @@ def home():
             'icon': '⚠️',
             'title': 'MINIMIZE LOADS',
             'description': 'Backup battery active - essential loads only',
-            'appliances': [
-                {'name': 'Oven', 'status': '❌', 'class': 'danger'},
-                {'name': 'Kettle', 'status': '⚠️', 'class': 'warning'},
-                {'name': 'Washing Machine', 'status': '❌', 'class': 'danger'},
-                {'name': 'Pool Pumps', 'status': '❌', 'class': 'danger'}
-            ],
             'class': 'warning'
         })
     elif is_safe_now:
         recommendation_items.append({
             'icon': '✅',
             'title': 'SAFE TO USE HEAVY LOADS',
-            'description': f'Battery: {p_bat:.0f}% | Solar: {tot_sol:.0f}W | Surplus: {surplus_power:.0f}W',
-            'appliances': [
-                {'name': 'Oven', 'status': '✅', 'class': 'good'},
-                {'name': 'Kettle', 'status': '✅', 'class': 'good'},
-                {'name': 'Washing Machine', 'status': '✅', 'class': 'good'},
-                {'name': 'Pool Pumps', 'status': '✅', 'class': 'good'}
-            ],
+            'description': f'Battery: {usable["total_pct"]:.0f}% | Solar: {tot_sol:.0f}W | Surplus: {surplus_power:.0f}W',
             'class': 'good'
         })
-    elif p_bat < 50 and tot_sol < tot_load:
+    elif usable['total_pct'] < 50 and tot_sol < tot_load:
         recommendation_items.append({
             'icon': '⚠️',
             'title': 'CONSERVE POWER',
-            'description': f'Battery low ({p_bat:.0f}%) and not charging well',
-            'appliances': [
-                {'name': 'Oven', 'status': '❌', 'class': 'danger'},
-                {'name': 'Kettle', 'status': '⚠️', 'class': 'warning'},
-                {'name': 'Washing Machine', 'status': '❌', 'class': 'danger'},
-                {'name': 'Pool Pumps', 'status': '❌', 'class': 'danger'}
-            ],
+            'description': f'Battery low ({usable["total_pct"]:.0f}%) and not charging well',
             'class': 'warning'
         })
     else:
@@ -748,12 +782,6 @@ def home():
             'icon': 'ℹ️',
             'title': 'MONITOR USAGE',
             'description': 'Check schedule below for optimal times',
-            'appliances': [
-                {'name': 'Oven', 'status': '⚠️', 'class': 'warning'},
-                {'name': 'Kettle', 'status': '✅', 'class': 'good'},
-                {'name': 'Washing Machine', 'status': '⚠️', 'class': 'warning'},
-                {'name': 'Pool Pumps', 'status': 'ℹ️', 'class': 'info'}
-            ],
             'class': 'normal'
         })
     
@@ -801,6 +829,12 @@ def home():
                 'time': 'Low solar next 3 hours',
                 'class': 'warning'
             })
+    
+    # Calculate runtime estimate
+    if tot_load > 0 and usable['total_kwh'] > 0:
+        runtime_hours = (usable['total_kwh'] * 1000) / tot_load
+    else:
+        runtime_hours = 0
 
     html_template = """
 <!DOCTYPE html>
@@ -809,32 +843,42 @@ def home():
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Tulia House Solar</title>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3.0.1/dist/chartjs-plugin-annotation.min.js"></script>
     <style>
         :root {
-            --bg: #0d1117;
-            --surface: #161b22;
-            --surface-2: #21262d;
-            --border: rgba(48, 54, 61, 0.8);
-            --text: #e6edf3;
-            --text-muted: #8b949e;
+            --bg: #0a0e13;
+            --surface: #151922;
+            --surface-2: #1d232e;
+            --border: rgba(58, 70, 89, 0.5);
+            --text: #e6edf5;
+            --text-muted: #8a95a8;
             --primary: #3fb950;
+            --primary-hover: #4ed65e;
             --warning: #f0883e;
             --danger: #f85149;
             --info: #58a6ff;
-            --radius: 12px;
-            --shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.3);
+            --battery-primary: #58a6ff;
+            --battery-backup: #f0883e;
+            --radius: 16px;
+            --shadow-sm: 0 4px 8px -2px rgba(0, 0, 0, 0.2);
+            --shadow-md: 0 8px 16px -3px rgba(0, 0, 0, 0.3);
+            --shadow-lg: 0 12px 24px -4px rgba(0, 0, 0, 0.4);
+            --transition: 0.3s cubic-bezier(0.4, 0.0, 0.2, 1);
         }
         
-        * { margin: 0; padding: 0; box-sizing: border-box; }
+        * { 
+            margin: 0; 
+            padding: 0; 
+            box-sizing: border-box; 
+        }
         
         body {
-            font-family: 'Inter', system-ui, -apple-system, sans-serif;
+            font-family: 'DM Sans', system-ui, -apple-system, sans-serif;
             background: var(--bg);
             color: var(--text);
-            line-height: 1.5;
+            line-height: 1.6;
             -webkit-font-smoothing: antialiased;
         }
         
@@ -848,21 +892,24 @@ def home():
         .dashboard-grid {
             display: grid;
             grid-template-columns: 1fr;
-            gap: 1.25rem;
+            gap: 1.5rem;
         }
         
-        /* Desktop: 12 Column Grid */
-        @media (min-width: 1024px) {
+        @media (min-width: 768px) {
             .dashboard-grid {
                 grid-template-columns: repeat(12, 1fr);
             }
             .span-12 { grid-column: span 12; }
+            .span-9 { grid-column: span 9; }
             .span-8 { grid-column: span 8; }
             .span-6 { grid-column: span 6; }
             .span-4 { grid-column: span 4; }
             .span-3 { grid-column: span 3; }
-            
-            .row-2 { grid-row: span 2; }
+        }
+        
+        @media (min-width: 1024px) {
+            .container { padding: 2rem; }
+            .dashboard-grid { gap: 1.5rem; }
         }
         
         /* Header */
@@ -873,14 +920,15 @@ def home():
         }
         
         h1 {
-            font-size: 2.25rem;
+            font-size: clamp(1.75rem, 5vw, 2.25rem);
             font-weight: 800;
             color: var(--primary);
             letter-spacing: -0.02em;
+            font-family: 'Space Mono', monospace;
         }
         
         .subtitle {
-            font-family: 'JetBrains Mono', monospace;
+            font-family: 'Space Mono', monospace;
             font-size: 0.8rem;
             color: var(--text-muted);
             text-transform: uppercase;
@@ -890,21 +938,23 @@ def home():
         
         /* Card Component */
         .card {
-            background: rgba(22, 27, 34, 0.7);
+            background: var(--surface);
             backdrop-filter: blur(10px);
             border: 1px solid var(--border);
             border-radius: var(--radius);
             padding: 1.5rem;
-            transition: transform 0.2s, box-shadow 0.2s, border-color 0.2s;
+            transition: transform var(--transition), box-shadow var(--transition), border-color var(--transition);
             display: flex;
             flex-direction: column;
             position: relative;
             overflow: hidden;
+            box-shadow: var(--shadow-md);
         }
         
         .card:hover {
-            border-color: rgba(63, 185, 80, 0.4);
-            box-shadow: 0 12px 24px -4px rgba(0, 0, 0, 0.4);
+            transform: translateY(-2px);
+            border-color: rgba(63, 185, 80, 0.6);
+            box-shadow: 0 16px 32px -6px rgba(0, 0, 0, 0.5);
         }
 
         .card h2 {
@@ -926,6 +976,7 @@ def home():
             text-align: center;
             position: relative;
             overflow: hidden;
+            box-shadow: var(--shadow-lg);
         }
         
         .status-hero::before {
@@ -937,9 +988,18 @@ def home():
             pointer-events: none;
         }
         
-        .status-hero.critical { border-color: var(--danger); background: linear-gradient(135deg, rgba(248,81,73,0.1), rgba(22,27,34,0.9)); }
-        .status-hero.warning { border-color: var(--warning); background: linear-gradient(135deg, rgba(240,136,62,0.1), rgba(22,27,34,0.9)); }
-        .status-hero.good { border-color: var(--primary); background: linear-gradient(135deg, rgba(63,185,80,0.1), rgba(22,27,34,0.9)); }
+        .status-hero.critical { 
+            border-color: var(--danger); 
+            background: linear-gradient(135deg, rgba(248,81,73,0.15), rgba(21,25,34,0.95)); 
+        }
+        .status-hero.warning { 
+            border-color: var(--warning); 
+            background: linear-gradient(135deg, rgba(240,136,62,0.15), rgba(21,25,34,0.95)); 
+        }
+        .status-hero.good { 
+            border-color: var(--primary); 
+            background: linear-gradient(135deg, rgba(63,185,80,0.15), rgba(21,25,34,0.95)); 
+        }
         
         .status-title {
             font-size: clamp(1.5rem, 3vw, 2.5rem);
@@ -954,7 +1014,7 @@ def home():
         
         /* Metric Cards */
         .metric-label {
-            font-size: 0.75rem;
+            font-size: 0.8rem;
             color: var(--text-muted);
             text-transform: uppercase;
             letter-spacing: 0.05em;
@@ -962,13 +1022,20 @@ def home():
         }
         
         .metric-value {
-            font-size: 2.25rem;
-            font-weight: 700;
-            font-family: 'JetBrains Mono', monospace;
+            font-size: clamp(1.5rem, 4vw, 1.875rem);
+            font-weight: 600;
+            font-family: 'Space Mono', monospace;
             margin: 0.25rem 0;
+            letter-spacing: 0.02em;
+            font-variant-numeric: tabular-nums;
         }
         
-        .metric-unit { font-size: 1rem; font-weight: 400; color: var(--text-muted); margin-left: 2px; }
+        .metric-unit { 
+            font-size: 1rem; 
+            font-weight: 400; 
+            color: var(--text-muted); 
+            margin-left: 2px; 
+        }
         
         .text-success { color: var(--primary); }
         .text-warning { color: var(--warning); }
@@ -981,13 +1048,13 @@ def home():
             display: flex;
             align-items: center;
             justify-content: center;
-            min-height: 250px;
+            min-height: 300px;
         }
         
         .power-flow {
             position: relative;
             width: 100%;
-            max-width: 700px;
+            max-width: 800px;
             aspect-ratio: 16/9;
         }
         
@@ -1008,22 +1075,30 @@ def home():
             border: 2px solid var(--border);
             border-radius: 50%;
             z-index: 10;
-            box-shadow: 0 4px 8px rgba(0,0,0,0.3);
+            box-shadow: var(--shadow-sm);
+            transition: all var(--transition);
         }
         
         .flow-node.inverter {
-            width: 18%; padding-bottom: 18%;
-            top: 50%; left: 50%; transform: translate(-50%, -50%);
+            width: 20%; 
+            padding-bottom: 20%;
+            top: 50%; 
+            left: 50%; 
+            transform: translate(-50%, -50%);
             border-color: var(--info);
+            box-shadow: var(--shadow-md);
         }
         
-        .flow-node:not(.inverter) { width: 14%; padding-bottom: 14%; }
+        .flow-node:not(.inverter) { 
+            width: 14%; 
+            padding-bottom: 14%; 
+        }
         
         /* Node Positions */
-        .flow-node.solar { top: 50%; left: 10%; transform: translateY(-50%); }
-        .flow-node.load { top: 50%; right: 10%; transform: translateY(-50%); }
-        .flow-node.battery { bottom: 10%; left: 50%; transform: translateX(-50%); }
-        .flow-node.generator { top: 10%; left: 50%; transform: translateX(-50%); }
+        .flow-node.solar { top: 50%; left: 8%; transform: translateY(-50%); }
+        .flow-node.load { top: 50%; right: 8%; transform: translateY(-50%); }
+        .flow-node.battery { bottom: 8%; left: 50%; transform: translateX(-50%); }
+        .flow-node.generator { top: 8%; left: 50%; transform: translateX(-50%); }
         
         .flow-node-content {
             position: absolute;
@@ -1035,57 +1110,153 @@ def home():
         }
         
         .flow-icon { font-size: 1.5rem; margin-bottom: 2px; }
-        .flow-label { font-size: 0.65rem; text-transform: uppercase; color: var(--text-muted); font-weight: 600; }
-        .flow-value { font-family: 'JetBrains Mono'; font-weight: 700; color: #fff; font-size: 0.85rem; }
+        .flow-label { 
+            font-size: 0.65rem; 
+            text-transform: uppercase; 
+            color: var(--text-muted); 
+            font-weight: 600; 
+        }
+        .flow-value { 
+            font-family: 'Space Mono', monospace; 
+            font-weight: 700; 
+            color: #fff; 
+            font-size: 0.85rem; 
+        }
 
-        /* Battery Stack */
-        .battery-stack {
-            display: flex;
-            flex-direction: column;
-            height: 100%;
-            gap: 1rem;
-            justify-content: center;
+        /* Battery System - Simplified */
+        .battery-system-card {
+            box-shadow: var(--shadow-md);
         }
         
-        .battery-unit {
-            border: 1px solid var(--border);
-            border-radius: 8px;
-            background: rgba(0,0,0,0.2);
-            padding: 1rem;
+        .battery-header {
             display: flex;
             align-items: center;
+            justify-content: space-between;
+            margin-bottom: 1.5rem;
             gap: 1rem;
         }
-
-        .battery-unit.active {
-             border-color: var(--primary);
-             box-shadow: 0 0 10px rgba(63, 185, 80, 0.1);
+        
+        .battery-icon { font-size: 1.5rem; }
+        
+        .battery-title {
+            font-size: 1.1rem;
+            font-weight: 600;
+            flex: 1;
         }
         
-        .battery-bar-container {
-            flex: 1;
-            height: 24px;
-            background: #2a3038;
-            border-radius: 4px;
+        .battery-total {
+            font-family: 'Space Mono', monospace;
+            font-size: 0.9rem;
+            color: var(--text-muted);
+        }
+        
+        .battery-combined-bar {
+            position: relative;
+            margin-bottom: 1.5rem;
+        }
+        
+        .battery-bar-track {
+            width: 100%;
+            height: 32px;
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 8px;
             overflow: hidden;
             position: relative;
+            border: 1px solid var(--border);
         }
         
-        .battery-bar {
+        .battery-bar-fill {
             height: 100%;
-            background: var(--primary);
-            transition: width 1s ease;
+            transition: width 1.5s ease;
+            position: relative;
+            background: linear-gradient(90deg, var(--battery-primary) 0%, var(--battery-backup) 100%);
         }
-        .battery-bar.warning { background: var(--warning); }
-        .battery-bar.critical { background: var(--danger); }
         
-        .battery-pct {
-            font-family: 'JetBrains Mono';
-            font-weight: 700;
-            min-width: 4rem;
-            text-align: right;
+        .battery-bar-fill.success {
+            background: linear-gradient(90deg, var(--battery-primary) 0%, var(--primary) 100%);
         }
-
+        
+        .battery-bar-fill.warning {
+            background: linear-gradient(90deg, var(--warning) 0%, var(--battery-backup) 100%);
+        }
+        
+        .battery-bar-fill.danger {
+            background: linear-gradient(90deg, var(--danger) 0%, var(--warning) 100%);
+        }
+        
+        .battery-percentage {
+            position: absolute;
+            right: 1rem;
+            top: 50%;
+            transform: translateY(-50%);
+            font-family: 'Space Mono', monospace;
+            font-weight: 700;
+            font-size: 1.1rem;
+            color: var(--text);
+            text-shadow: 0 2px 4px rgba(0,0,0,0.8);
+        }
+        
+        .battery-details {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1rem;
+            margin-bottom: 1rem;
+        }
+        
+        .battery-source {
+            padding: 1rem;
+            background: rgba(0, 0, 0, 0.2);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+        
+        .battery-source.active {
+            border-color: var(--battery-primary);
+            box-shadow: 0 0 20px rgba(88, 166, 255, 0.3);
+            animation: pulse 2s infinite;
+        }
+        
+        @keyframes pulse {
+            0%, 100% { box-shadow: 0 0 20px rgba(88, 166, 255, 0.3); }
+            50% { box-shadow: 0 0 30px rgba(88, 166, 255, 0.6); }
+        }
+        
+        .source-label {
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            font-weight: 600;
+        }
+        
+        .source-status {
+            font-family: 'Space Mono', monospace;
+            font-size: 0.9rem;
+            color: var(--text);
+        }
+        
+        .battery-footer {
+            padding-top: 1rem;
+            border-top: 1px solid var(--border);
+        }
+        
+        .battery-info {
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            text-align: center;
+            margin-bottom: 0.5rem;
+        }
+        
+        .battery-runtime {
+            font-size: 0.9rem;
+            color: var(--text);
+            text-align: center;
+            font-weight: 500;
+        }
+        
         /* Recommendations */
         .rec-item {
             display: flex;
@@ -1095,7 +1266,13 @@ def home():
             background: rgba(255,255,255,0.03);
             border-radius: 8px;
             margin-bottom: 0.75rem;
+            border-left: 4px solid;
         }
+        
+        .rec-item.critical { border-left-color: var(--danger); }
+        .rec-item.warning { border-left-color: var(--warning); }
+        .rec-item.good { border-left-color: var(--primary); }
+        .rec-item.normal { border-left-color: var(--info); }
         
         .rec-icon { font-size: 1.5rem; }
         .rec-title { font-weight: 600; margin-bottom: 0.25rem; }
@@ -1105,7 +1282,11 @@ def home():
         .chart-wrapper {
             position: relative;
             width: 100%;
-            height: 300px;
+            height: 280px;
+        }
+        
+        @media (min-width: 768px) {
+            .chart-wrapper { height: 320px; }
         }
         
         @media (min-width: 1024px) {
@@ -1115,8 +1296,14 @@ def home():
         /* Inverters Grid */
         .inv-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            grid-template-columns: 1fr;
             gap: 1rem;
+        }
+        
+        @media (min-width: 600px) {
+            .inv-grid {
+                grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            }
         }
         
         .inv-card {
@@ -1126,7 +1313,10 @@ def home():
             padding: 1rem;
         }
         
-        .inv-card.fault { border-color: var(--danger); background: rgba(248,81,73,0.1); }
+        .inv-card.fault { 
+            border-color: var(--danger); 
+            background: rgba(248,81,73,0.1); 
+        }
         
         /* Alerts List */
         .alert-row {
@@ -1137,17 +1327,34 @@ def home():
             font-size: 0.9rem;
         }
         .alert-row:last-child { border-bottom: none; }
-        .alert-time { font-family: 'JetBrains Mono'; color: var(--text-muted); }
-        
-        /* Animation */
-        @keyframes flowPulse {
-            0% { stroke-dashoffset: 20; }
-            100% { stroke-dashoffset: 0; }
+        .alert-time { 
+            font-family: 'Space Mono', monospace; 
+            color: var(--text-muted);
+            min-width: 50px;
         }
         
-        .flow-line {
-            stroke-dasharray: 5;
-            animation: flowPulse 1s linear infinite;
+        /* Mobile Optimizations */
+        @media (max-width: 767px) {
+            .container { padding: 1rem; }
+            .dashboard-grid { gap: 1rem; }
+            .card { padding: 1rem; }
+            .status-hero { padding: 1.5rem; }
+            
+            .battery-details {
+                grid-template-columns: 1fr;
+            }
+            
+            .flow-node.solar { top: 15%; left: 50%; transform: translate(-50%, 0); }
+            .flow-node.generator { top: 5%; right: 10%; left: auto; transform: none; }
+            .flow-node.inverter { top: 40%; }
+            .flow-node.load { bottom: 15%; right: 50%; top: auto; transform: translateX(50%); }
+            .flow-node.battery { bottom: 5%; }
+        }
+        
+        /* Focus styles for accessibility */
+        *:focus-visible {
+            outline: 2px solid var(--info);
+            outline-offset: 2px;
         }
     </style>
 </head>
@@ -1182,7 +1389,7 @@ def home():
             <div class="card span-3">
                 <div class="metric-label">Primary Battery</div>
                 <div class="metric-value {{ primary_color }}">{{ '%0.f'|format(p_bat) }}<span class="metric-unit">%</span></div>
-                <div style="font-size: 0.85rem; color: var(--text-muted)">~{{ '%0.1f'|format(p_kwh) }} kWh remaining</div>
+                <div style="font-size: 0.85rem; color: var(--text-muted)">Raw system reading</div>
             </div>
             
             <div class="card span-3">
@@ -1191,45 +1398,76 @@ def home():
                 <div style="font-size: 0.85rem; color: var(--text-muted)">Status: {{ b_stat }}</div>
             </div>
             
-            <!-- Power Flow Diagram (Big Central Piece) -->
-            <div class="card span-8 row-2">
+            <!-- Power Flow Diagram (Larger - span-9) -->
+            <div class="card span-9">
                 <h2>⚡ Real-Time Energy Flow</h2>
                 <div class="power-flow-container">
                     <div class="power-flow">
                         <svg class="flow-svg" viewBox="0 0 100 56.25" preserveAspectRatio="xMidYMid meet">
                             <!-- Solar to Inverter -->
-                            <path d="M10 28.125 L50 28.125" stroke="{{ 'var(--primary)' if solar_active else 'var(--border)' }}" stroke-width="0.5" />
+                            <defs>
+                                <filter id="glow">
+                                    <feGaussianBlur stdDeviation="2" result="coloredBlur"/>
+                                    <feMerge>
+                                        <feMergeNode in="coloredBlur"/>
+                                        <feMergeNode in="SourceGraphic"/>
+                                    </feMerge>
+                                </filter>
+                                <linearGradient id="solarGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+                                    <stop offset="0%" style="stop-color:#3fb950;stop-opacity:1" />
+                                    <stop offset="100%" style="stop-color:#58a6ff;stop-opacity:1" />
+                                </linearGradient>
+                                <linearGradient id="loadGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+                                    <stop offset="0%" style="stop-color:#58a6ff;stop-opacity:1" />
+                                    <stop offset="100%" style="stop-color:#3fb950;stop-opacity:1" />
+                                </linearGradient>
+                            </defs>
+                            
+                            <!-- Solar to Inverter -->
+                            <path d="M 8 28.125 L 50 28.125" 
+                                  stroke="{{ 'url(#solarGradient)' if solar_active else 'var(--border)' }}" 
+                                  stroke-width="{{ solar_line_width if solar_active else 0.5 }}"
+                                  filter="{{ 'url(#glow)' if solar_active else '' }}" />
                             {% if solar_active %}
-                            <circle r="0.8" fill="var(--primary)">
-                                <animateMotion dur="2s" repeatCount="indefinite" path="M10 28.125 L50 28.125" />
+                            <circle r="1" fill="var(--primary)">
+                                <animateMotion dur="{{ 3 - (tot_sol / 5000) }}s" repeatCount="indefinite" path="M 8 28.125 L 50 28.125" />
                             </circle>
                             {% endif %}
                             
                             <!-- Inverter to Load -->
-                            <path d="M50 28.125 L90 28.125" stroke="{{ 'var(--info)' if tot_load > 0 else 'var(--border)' }}" stroke-width="0.5" />
+                            <path d="M 50 28.125 L 92 28.125" 
+                                  stroke="{{ 'url(#loadGradient)' if tot_load > 0 else 'var(--border)' }}" 
+                                  stroke-width="{{ load_line_width if tot_load > 0 else 0.5 }}"
+                                  filter="{{ 'url(#glow)' if tot_load > 0 else '' }}" />
                             {% if tot_load > 0 %}
-                            <circle r="0.8" fill="var(--info)">
-                                <animateMotion dur="1.5s" repeatCount="indefinite" path="M50 28.125 L90 28.125" />
+                            <circle r="1" fill="var(--info)">
+                                <animateMotion dur="1.5s" repeatCount="indefinite" path="M 50 28.125 L 92 28.125" />
                             </circle>
                             {% endif %}
                             
                             <!-- Battery to/from Inverter -->
-                            <path d="M50 28.125 L50 50" stroke="{{ 'var(--primary)' if battery_charging else ('var(--danger)' if battery_discharging else 'var(--border)') }}" stroke-width="0.5" />
+                            <path d="M 50 28.125 L 50 52" 
+                                  stroke="{{ 'var(--primary)' if battery_charging else ('var(--danger)' if battery_discharging else 'var(--border)') }}" 
+                                  stroke-width="{{ battery_line_width if (battery_charging or battery_discharging) else 0.5 }}"
+                                  filter="{{ 'url(#glow)' if (battery_charging or battery_discharging) else '' }}" />
                             {% if battery_charging %}
-                            <circle r="0.8" fill="var(--primary)">
-                                <animateMotion dur="2s" repeatCount="indefinite" path="M50 28.125 L50 50" />
+                            <circle r="1" fill="var(--primary)">
+                                <animateMotion dur="2s" repeatCount="indefinite" path="M 50 28.125 L 50 52" />
                             </circle>
                             {% elif battery_discharging %}
-                            <circle r="0.8" fill="var(--danger)">
-                                <animateMotion dur="2s" repeatCount="indefinite" path="M50 50 L50 28.125" />
+                            <circle r="1" fill="var(--danger)">
+                                <animateMotion dur="2s" repeatCount="indefinite" path="M 50 52 L 50 28.125" />
                             </circle>
                             {% endif %}
                             
                             <!-- Generator to Inverter -->
-                            <path d="M50 5.625 L50 28.125" stroke="{{ 'var(--danger)' if gen_on else 'var(--border)' }}" stroke-width="0.5" />
+                            <path d="M 50 4 L 50 28.125" 
+                                  stroke="{{ 'var(--danger)' if gen_on else 'var(--border)' }}" 
+                                  stroke-width="{{ '4' if gen_on else '0.5' }}"
+                                  filter="{{ 'url(#glow)' if gen_on else '' }}" />
                             {% if gen_on %}
-                            <circle r="0.8" fill="var(--danger)">
-                                <animateMotion dur="1s" repeatCount="indefinite" path="M50 5.625 L50 28.125" />
+                            <circle r="1" fill="var(--danger)">
+                                <animateMotion dur="1s" repeatCount="indefinite" path="M 50 4 L 50 28.125" />
                             </circle>
                             {% endif %}
                         </svg>
@@ -1238,38 +1476,41 @@ def home():
                         <div class="flow-node solar"><div class="flow-node-content"><div class="flow-icon">☀️</div><div class="flow-label">Solar</div><div class="flow-value">{{ '%0.f'|format(tot_sol) }}W</div></div></div>
                         <div class="flow-node inverter"><div class="flow-node-content"><div class="flow-icon">⚡</div><div class="flow-label">Inverter</div><div class="flow-value">{{ inverter_temp }}°C</div></div></div>
                         <div class="flow-node load"><div class="flow-node-content"><div class="flow-icon">🏠</div><div class="flow-label">Load</div><div class="flow-value">{{ '%0.f'|format(tot_load) }}W</div></div></div>
-                        <div class="flow-node battery"><div class="flow-node-content"><div class="flow-icon">🔋</div><div class="flow-label">Bat</div><div class="flow-value">{{ '%0.f'|format(p_bat) }}%</div></div></div>
+                        <div class="flow-node battery"><div class="flow-node-content"><div class="flow-icon">🔋</div><div class="flow-label">Bat</div><div class="flow-value">{{ '%0.f'|format(usable.total_pct) }}%</div></div></div>
                         <div class="flow-node generator"><div class="flow-node-content"><div class="flow-icon">{{ '⚠️' if gen_on else '🔌' }}</div><div class="flow-label">Gen</div><div class="flow-value">{{ 'ON' if gen_on else 'OFF' }}</div></div></div>
                     </div>
                 </div>
             </div>
             
-            <!-- Battery Detail Stack -->
-            <div class="card span-4">
-                <h2>🔋 Battery Status</h2>
-                <div class="battery-stack">
-                    <div class="battery-unit {{ 'active' if not b_active else '' }}">
-                        <div style="flex:1">
-                            <div style="font-size:0.8rem; margin-bottom:0.25rem;">Primary Bank (30kWh)</div>
-                            <div class="battery-bar-container">
-                                <div class="battery-bar {{ primary_battery_class }}" style="width: {{ p_bat }}%"></div>
-                            </div>
-                        </div>
-                        <div class="battery-pct {{ primary_color }}">{{ '%0.f'|format(p_bat) }}%</div>
+            <!-- Battery Detail (Simplified - span-3) -->
+            <div class="card battery-system-card span-3">
+                <div class="battery-header">
+                    <span class="battery-icon">🔋</span>
+                    <span class="battery-title">BATTERY</span>
+                </div>
+                
+                <div class="battery-combined-bar">
+                    <div class="battery-bar-track">
+                        <div class="battery-bar-fill {{ battery_bar_color }}" style="width: {{ usable.total_pct }}%"></div>
+                    </div>
+                    <div class="battery-percentage">{{ '%0.f'|format(usable.total_pct) }}%</div>
+                </div>
+                
+                <div class="battery-details">
+                    <div class="battery-source {{ 'active' if not b_active else '' }}">
+                        <span class="source-label">Primary</span>
+                        <span class="source-status">{{ '⚡ Active • ' + ('%0.f'|format(tot_dis)) + 'W' if not b_active else '💤 Standby' }}</span>
                     </div>
                     
-                    <div class="battery-unit {{ 'active' if b_active else '' }}">
-                        <div style="flex:1">
-                            <div style="font-size:0.8rem; margin-bottom:0.25rem;">Backup Bank (21kWh)</div>
-                            <div class="battery-bar-container">
-                                <div class="battery-bar {{ backup_battery_class }}" style="width: {{ b_pct }}%"></div>
-                            </div>
-                        </div>
-                        <div class="battery-pct {{ backup_color }}">{{ '%0.f'|format(b_pct) }}%</div>
+                    <div class="battery-source {{ 'active' if b_active else '' }}">
+                        <span class="source-label">Backup</span>
+                        <span class="source-status">{{ '⚡ Active • ' + ('%0.f'|format(tot_dis)) + 'W' if b_active else '💤 Standby' }}</span>
                     </div>
                 </div>
-                <div style="margin-top: 1rem; font-size: 0.85rem; color: var(--text-muted); text-align: center;">
-                    Backup is currently: <span style="color: var(--text); font-weight: bold;">{{ 'ACTIVE' if b_active else 'STANDBY' }}</span>
+                
+                <div class="battery-footer">
+                    <div class="battery-info">Backup activates when Primary reaches 40%</div>
+                    <div class="battery-runtime">~{{ '%0.f'|format(runtime_hours) }} hours remaining</div>
                 </div>
             </div>
 
@@ -1277,7 +1518,7 @@ def home():
             <div class="card span-4">
                 <h2>📝 Recommendations</h2>
                 {% for rec in recommendation_items %}
-                <div class="rec-item">
+                <div class="rec-item {{ rec.class }}">
                     <div class="rec-icon">{{ rec.icon }}</div>
                     <div>
                         <div class="rec-title">{{ rec.title }}</div>
@@ -1288,7 +1529,7 @@ def home():
             </div>
 
             <!-- Inverters -->
-            <div class="card span-4 row-2">
+            <div class="card span-4">
                 <h2>⚙️ Inverter Status</h2>
                 <div class="inv-grid">
                 {% for inv in latest_data.get('inverters', []) %}
@@ -1296,11 +1537,11 @@ def home():
                         <div style="font-weight: 700; font-size: 0.9rem; margin-bottom: 0.5rem">{{ inv.Label }}</div>
                         <div style="display:flex; justify-content:space-between; font-size: 0.8rem; margin-bottom: 4px;">
                             <span style="color:var(--text-muted)">Out:</span>
-                            <span style="font-family:'JetBrains Mono'">{{ '%0.f'|format(inv.OutputPower) }}W</span>
+                            <span style="font-family:'Space Mono'">{{ '%0.f'|format(inv.OutputPower) }}W</span>
                         </div>
                         <div style="display:flex; justify-content:space-between; font-size: 0.8rem; margin-bottom: 4px;">
                             <span style="color:var(--text-muted)">Bat:</span>
-                            <span style="font-family:'JetBrains Mono'">{{ '%0.1f'|format(inv.vBat) }}V</span>
+                            <span style="font-family:'Space Mono'">{{ '%0.1f'|format(inv.vBat) }}V</span>
                         </div>
                         <div style="display:flex; justify-content:space-between; font-size: 0.8rem;">
                             <span style="color:var(--text-muted)">Temp:</span>
@@ -1315,7 +1556,7 @@ def home():
             <div class="card span-4">
                  <h2>📅 Schedule</h2>
                  {% for item in schedule_items %}
-                 <div class="rec-item" style="border-left: 3px solid {{ 'var(--primary)' if 'good' in item.class else 'var(--warning)' }}">
+                 <div class="rec-item {{ item.class }}" style="border-left: 3px solid {{ 'var(--primary)' if 'good' in item.class else 'var(--warning)' }}">
                     <div class="rec-icon">{{ item.icon }}</div>
                     <div>
                         <div class="rec-title">{{ item.title }}</div>
@@ -1366,15 +1607,15 @@ def home():
     
     <script>
         // Chart Config
-        Chart.defaults.color = '#8b949e';
-        Chart.defaults.borderColor = 'rgba(48, 54, 61, 0.4)';
-        Chart.defaults.font.family = "'Inter', sans-serif";
+        Chart.defaults.color = '#8a95a8';
+        Chart.defaults.borderColor = 'rgba(58, 70, 89, 0.4)';
+        Chart.defaults.font.family = "'DM Sans', sans-serif";
         
         const commonOptions = {
             responsive: true,
             maintainAspectRatio: false,
             plugins: {
-                legend: { position: 'top', align: 'end', labels: { boxWidth: 10, usePointStyle: true } }
+                legend: { position: 'top', align: 'end', labels: { boxWidth: 10, usePointStyle: true, font: { size: 11 } } }
             },
             interaction: { mode: 'index', intersect: false }
         };
@@ -1385,8 +1626,24 @@ def home():
             data: {
                 labels: {{ forecast_times|tojson }},
                 datasets: [
-                    { label: 'Solar', data: {{ forecast_solar|tojson }}, borderColor: '#3fb950', backgroundColor: 'rgba(63, 185, 80, 0.1)', fill: true, tension: 0.4 },
-                    { label: 'Load', data: {{ forecast_load|tojson }}, borderColor: '#58a6ff', backgroundColor: 'rgba(88, 166, 255, 0.1)', fill: true, tension: 0.4 }
+                    { 
+                        label: 'Solar', 
+                        data: {{ forecast_solar|tojson }}, 
+                        borderColor: '#3fb950', 
+                        backgroundColor: 'rgba(63, 185, 80, 0.15)', 
+                        fill: true, 
+                        tension: 0.4,
+                        borderWidth: 2
+                    },
+                    { 
+                        label: 'Load', 
+                        data: {{ forecast_load|tojson }}, 
+                        borderColor: '#58a6ff', 
+                        backgroundColor: 'rgba(88, 166, 255, 0.15)', 
+                        fill: true, 
+                        tension: 0.4,
+                        borderWidth: 2
+                    }
                 ]
             },
             options: commonOptions
@@ -1402,16 +1659,53 @@ def home():
                     data: {{ trace_pct|tojson }},
                     borderColor: '#58a6ff',
                     borderWidth: 2,
-                    segment: { borderColor: ctx => ctx.p0.parsed.y < 48 ? '#f85149' : '#3fb950' },
+                    segment: { 
+                        borderColor: ctx => {
+                            const y = ctx.p0.parsed.y;
+                            if (y < 25) return '#f85149';
+                            if (y < 60) return '#f0883e';
+                            return '#3fb950';
+                        }
+                    },
                     fill: { target: 'origin', above: 'rgba(88, 166, 255, 0.1)' },
                     tension: 0.4
                 }]
             },
             options: {
                 ...commonOptions,
-                plugins: { ...commonOptions.plugins, annotation: { annotations: {
-                    line1: { type: 'line', yMin: 48, yMax: 48, borderColor: 'rgba(240, 136, 62, 0.5)', borderWidth: 1, borderDash: [4, 4] }
-                }}}
+                plugins: { 
+                    ...commonOptions.plugins, 
+                    annotation: { 
+                        annotations: {
+                            line1: { 
+                                type: 'line', 
+                                yMin: 60, 
+                                yMax: 60, 
+                                borderColor: 'rgba(63, 185, 80, 0.5)', 
+                                borderWidth: 2, 
+                                borderDash: [4, 4],
+                                label: {
+                                    content: 'Safe Zone',
+                                    enabled: true,
+                                    position: 'end'
+                                }
+                            },
+                            line2: {
+                                type: 'line',
+                                yMin: 25,
+                                yMax: 25,
+                                borderColor: 'rgba(240, 136, 62, 0.5)',
+                                borderWidth: 2,
+                                borderDash: [4, 4],
+                                label: {
+                                    content: 'Warning',
+                                    enabled: true,
+                                    position: 'end'
+                                }
+                            }
+                        }
+                    }
+                }
             }
         });
         
@@ -1421,8 +1715,22 @@ def home():
             data: {
                 labels: {{ times|tojson }},
                 datasets: [
-                    { label: 'Load', data: {{ l_vals|tojson }}, borderColor: '#58a6ff', borderWidth: 1.5, pointRadius: 0 },
-                    { label: 'Discharge', data: {{ b_vals|tojson }}, borderColor: '#f85149', borderWidth: 1.5, pointRadius: 0 }
+                    { 
+                        label: 'Load', 
+                        data: {{ l_vals|tojson }}, 
+                        borderColor: '#58a6ff', 
+                        borderWidth: 2, 
+                        pointRadius: 0,
+                        tension: 0.3
+                    },
+                    { 
+                        label: 'Discharge', 
+                        data: {{ b_vals|tojson }}, 
+                        borderColor: '#f85149', 
+                        borderWidth: 2, 
+                        pointRadius: 0,
+                        tension: 0.3
+                    }
                 ]
             },
             options: commonOptions
@@ -1451,24 +1759,25 @@ def home():
         tot_sol=tot_sol,
         p_bat=p_bat,
         b_volt=b_volt,
-        p_kwh=p_kwh,
-        b_kwh=b_kwh,
         b_pct=b_pct,
         b_stat=b_stat,
+        usable=usable,
         load_trend_icon=load_trend_icon,
         load_trend_text=load_trend_text,
         solar_trend_icon=solar_trend_icon,
         solar_trend_text=solar_trend_text,
         primary_color=primary_color,
         backup_color=backup_color,
-        primary_battery_class=primary_battery_class,
-        backup_battery_class=backup_battery_class,
+        battery_bar_color=battery_bar_color,
         solar_active=solar_active,
         battery_charging=battery_charging,
         battery_discharging=battery_discharging,
         gen_on=gen_on,
         b_active=b_active,
         inverter_temp=inverter_temp,
+        solar_line_width=solar_line_width,
+        load_line_width=load_line_width,
+        battery_line_width=battery_line_width,
         recommendation_items=recommendation_items,
         schedule_items=schedule_items,
         forecast_times=forecast_times,
@@ -1480,7 +1789,8 @@ def home():
         l_vals=l_vals,
         b_vals=b_vals,
         latest_data=latest_data,
-        alerts=alerts
+        alerts=alerts,
+        runtime_hours=runtime_hours
     )
 
 if __name__ == "__main__":
