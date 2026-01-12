@@ -1042,7 +1042,7 @@ def home():
         .text-danger { color: var(--danger); }
         .text-info { color: var(--info); }
         
-        /* Power Flow - UPDATED: Simplified layout without connecting lines */
+        /* Power Flow - UPDATED: Hidden lines with contained animation dots */
         .power-flow-container {
             flex: 1;
             display: flex;
@@ -1057,16 +1057,70 @@ def home():
             width: 100%;
             max-width: 800px;
             height: 300px;
-            display: flex;
-            flex-wrap: wrap;
+            aspect-ratio: 16/9;
+            display: grid;
+            grid-template-columns: 1fr auto 1fr;
+            grid-template-rows: 1fr auto 1fr;
             align-items: center;
-            justify-content: space-around;
-            gap: 1.5rem;
+            justify-items: center;
             margin: 0 auto;
         }
         
         .flow-svg {
-            display: none; /* Hide all connecting lines */
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            top: 0; 
+            left: 0;
+            z-index: 1;
+            pointer-events: none;
+        }
+        
+        /* Hide all connecting lines */
+        .flow-svg path {
+            stroke-width: 0 !important;
+            opacity: 0 !important;
+        }
+        
+        /* Keep animation dots but contain them within icons */
+        .flow-svg circle {
+            transform-box: fill-box;
+            transform-origin: center;
+            animation: pulse-dot 2s infinite;
+            r: 2;
+            fill: var(--info);
+        }
+        
+        @keyframes pulse-dot {
+            0%, 100% { 
+                transform: scale(1);
+                opacity: 0.7;
+            }
+            50% { 
+                transform: scale(1.3);
+                opacity: 1;
+            }
+        }
+        
+        /* Position animation dots within each icon */
+        .flow-svg circle:nth-child(2) { /* Solar dot */
+            cx: 28;
+            cy: 28.125;
+        }
+        
+        .flow-svg circle:nth-child(3) { /* Load dot */
+            cx: 72;
+            cy: 28.125;
+        }
+        
+        .flow-svg circle:nth-child(4) { /* Battery dot */
+            cx: 50;
+            cy: 42;
+        }
+        
+        .flow-svg circle:nth-child(5) { /* Generator dot */
+            cx: 50;
+            cy: 14;
         }
         
         .flow-node {
@@ -1085,29 +1139,42 @@ def home():
             position: relative;
         }
         
-        /* Position nodes in a clean grid without connecting lines */
+        /* Position nodes in the grid with proper alignment - Maintaining hub layout */
+        .flow-node.solar { 
+            grid-column: 1; 
+            grid-row: 2;
+            justify-self: end;
+            margin-right: 15px;
+        }
+        
         .flow-node.inverter { 
+            grid-column: 2; 
+            grid-row: 2;
             width: clamp(70px, 18vw, 110px);
             height: clamp(70px, 18vw, 110px);
             border-color: var(--info);
             box-shadow: var(--shadow-md);
-            order: 2; /* Center position */
-        }
-        
-        .flow-node.solar { 
-            order: 1;
         }
         
         .flow-node.load { 
-            order: 3;
+            grid-column: 3; 
+            grid-row: 2;
+            justify-self: start;
+            margin-left: 15px;
         }
         
         .flow-node.battery { 
-            order: 4;
+            grid-column: 2; 
+            grid-row: 3;
+            align-self: start;
+            margin-top: 15px;
         }
         
         .flow-node.generator { 
-            order: 5;
+            grid-column: 2; 
+            grid-row: 1;
+            align-self: end;
+            margin-bottom: 15px;
         }
         
         .flow-node-content {
@@ -1366,7 +1433,6 @@ def home():
             
             .power-flow {
                 height: 250px;
-                gap: 1rem;
             }
             
             .flow-node {
@@ -1378,6 +1444,12 @@ def home():
                 width: clamp(60px, 20vw, 85px);
                 height: clamp(60px, 20vw, 85px);
             }
+            
+            /* Adjust animation dot positions for mobile */
+            .flow-svg circle:nth-child(2) { cx: 26; }
+            .flow-svg circle:nth-child(3) { cx: 74; }
+            .flow-svg circle:nth-child(4) { cy: 40; }
+            .flow-svg circle:nth-child(5) { cy: 16; }
         }
         
         /* Focus styles for accessibility */
@@ -1432,8 +1504,52 @@ def home():
                 <h2>⚡ Real-Time Energy Flow</h2>
                 <div class="power-flow-container">
                     <div class="power-flow">
-                        <!-- SVG removed - no connecting lines -->
-                        <!-- DOM Nodes positioned with CSS Flexbox -->
+                        <svg class="flow-svg" viewBox="0 0 100 56.25" preserveAspectRatio="xMidYMid meet">
+                            <!-- Solar to Inverter (lines hidden) -->
+                            <defs>
+                                <filter id="glow">
+                                    <feGaussianBlur stdDeviation="2" result="coloredBlur"/>
+                                    <feMerge>
+                                        <feMergeNode in="coloredBlur"/>
+                                        <feMergeNode in="SourceGraphic"/>
+                                    </feMerge>
+                                </filter>
+                            </defs>
+                            
+                            <!-- Solar to Inverter - LINE HIDDEN -->
+                            <path d="M 12 28.125 L 44 28.125" 
+                                  stroke="transparent" 
+                                  stroke-width="0"/>
+                            
+                            <!-- Solar animation dot (contained within solar icon) -->
+                            <circle cx="28" cy="28.125" r="2" fill="var(--info)"/>
+                            
+                            <!-- Inverter to Load - LINE HIDDEN -->
+                            <path d="M 56 28.125 L 88 28.125" 
+                                  stroke="transparent" 
+                                  stroke-width="0"/>
+                            
+                            <!-- Load animation dot (contained within load icon) -->
+                            <circle cx="72" cy="28.125" r="2" fill="var(--info)"/>
+                            
+                            <!-- Battery to/from Inverter - LINE HIDDEN -->
+                            <path d="M 50 36 L 50 48" 
+                                  stroke="transparent" 
+                                  stroke-width="0"/>
+                            
+                            <!-- Battery animation dot (contained within battery icon) -->
+                            <circle cx="50" cy="42" r="2" fill="var(--info)"/>
+                            
+                            <!-- Generator to Inverter - LINE HIDDEN -->
+                            <path d="M 50 8 L 50 20" 
+                                  stroke="transparent" 
+                                  stroke-width="0"/>
+                            
+                            <!-- Generator animation dot (contained within generator icon) -->
+                            <circle cx="50" cy="14" r="2" fill="var(--info)"/>
+                        </svg>
+                        
+                        <!-- DOM Nodes positioned with CSS Grid - Hub layout maintained -->
                         <div class="flow-node solar"><div class="flow-node-content"><div class="flow-icon">☀️</div><div class="flow-label">Solar</div><div class="flow-value">{{ '%0.f'|format(tot_sol) }}W</div></div></div>
                         <div class="flow-node inverter"><div class="flow-node-content"><div class="flow-icon">⚡</div><div class="flow-label">Inverter</div><div class="flow-value">{{ inverter_temp }}°C</div></div></div>
                         <div class="flow-node load"><div class="flow-node-content"><div class="flow-icon">🏠</div><div class="flow-label">Load</div><div class="flow-value">{{ '%0.f'|format(tot_load) }}W</div></div></div>
