@@ -549,9 +549,9 @@ def poll_growatt():
                     duration = now - pool_pump_start_time
                     if duration > timedelta(hours=3) and now.hour >= 18:
                         if pool_pump_last_alert is None or (now - pool_pump_last_alert) > timedelta(hours=1):
+                            duration_hours = int(duration.total_seconds() // 3600)
                             send_email(
                                 "⚠️ HIGH LOAD ALERT: Pool Pumps?", 
-                                duration_hours = int(duration.total_seconds() // 3600)
                                 f"Battery discharge has been over 1.1kW for {duration_hours} hours. Did you leave the pool pumps on?", 
                                 "high_load_continuous"
                             )
