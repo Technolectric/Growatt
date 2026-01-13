@@ -552,8 +552,6 @@ def poll_growatt():
                             send_email(
                                 "⚠️ HIGH LOAD ALERT: Pool Pumps?", 
                                 duration_hours = int(duration.total_seconds() // 3600)
-                            send_email(
-                                "⚠️ HIGH LOAD ALERT: Pool Pumps?", 
                                 f"Battery discharge has been over 1.1kW for {duration_hours} hours. Did you leave the pool pumps on?", 
                                 "high_load_continuous"
                             )
@@ -1881,5 +1879,4 @@ def home():
 
 if __name__ == "__main__":
     Thread(target=poll_growatt, daemon=True).start()
-    # For PythonAnywhere: Comment out app.run (WSGI handles it)
-    # app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
